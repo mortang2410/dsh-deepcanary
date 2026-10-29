@@ -23,6 +23,8 @@ describe('DSH tool registration', () => {
       'deepcanary_jump',
       'deepcanary_record_decision',
       'deepcanary_list_decisions',
+      'deepcanary_request_decision',
+      'deepcanary_cancel_decision',
     ])
     expect(definitions.every(definition => typeof definition.output === 'object')).toBe(true)
     await service.dispose()

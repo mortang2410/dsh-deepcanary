@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { hasCatalogSession, openAttentionSession } from '../src/client/session-navigation.js'
+import { decisionSessionLabel, hasCatalogSession, openAttentionSession } from '../src/client/session-navigation.js'
 
 describe('version-aware session navigation', () => {
   it('returns to retained history by exact catalog identity without treating disposal as deletion', () => {
@@ -66,5 +66,20 @@ describe('version-aware session navigation', () => {
 
   it('does not navigate an empty target', () => {
     expect(openAttentionSession({ get: () => { throw new Error('must not resolve') }, sessions: {} }, ' ')).toBe(false)
+  })
+})
+
+describe('decision session label', () => {
+  it('names the session by its title when the host supplied one', () => {
+    expect(decisionSessionLabel({ sessionId: 'session-a', decision: { sessionTitle: 'Store refactor' } })).toBe('Store refactor')
+  })
+
+  it('falls back to the session ID, so decisions from two sessions stay distinguishable', () => {
+    expect(decisionSessionLabel({ sessionId: 'session-a', decision: {} })).toBe('session-a')
+    expect(decisionSessionLabel({ sessionId: 'session-b', decision: { sessionTitle: '' } })).toBe('session-b')
+  })
+
+  it('names nothing for an item with no session', () => {
+    expect(decisionSessionLabel({ decision: {} })).toBeUndefined()
   })
 })

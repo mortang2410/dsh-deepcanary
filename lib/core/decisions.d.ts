@@ -6,9 +6,12 @@ export declare const DECISION_LIMITS: {
     readonly blastRadius: 2000;
     readonly sessionTitle: 200;
     readonly workingDirectory: 500;
+    readonly optionLabel: 120;
 };
+/** A pending decision offers at most this many options. */
+export declare const MAX_DECISION_OPTIONS = 5;
 export type DecisionTextField = keyof typeof DECISION_LIMITS;
-export interface MadeDecisionText {
+export interface DecisionText {
     sentence: string;
     explanation: string;
     alternatives: string;
@@ -21,11 +24,16 @@ export interface MadeDecisionText {
  */
 export declare function boundedDecisionText(field: DecisionTextField, value: unknown, required: true): string;
 export declare function boundedDecisionText(field: DecisionTextField, value: unknown, required: false): string | undefined;
-/** Validate every text field of a made decision. All four are required. */
-export declare function madeDecisionText(input: {
+/** Validate the four text fields of a decision. All four are required. */
+export declare function decisionText(input: {
     sentence: unknown;
     explanation: unknown;
     alternatives: unknown;
     blastRadius: unknown;
-}): MadeDecisionText;
+}): DecisionText;
+/**
+ * Validate the options a pending decision offers: a list of at most five labels, each
+ * at most 120 characters. Zero options are allowed. Nothing is truncated or dropped.
+ */
+export declare function decisionOptions(value: unknown): string[];
 //# sourceMappingURL=decisions.d.ts.map

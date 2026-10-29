@@ -6,7 +6,11 @@ export const DECISION_LIMITS = {
   blastRadius: 2000,
   sessionTitle: 200,
   workingDirectory: 500,
+  optionLabel: 120,
 } as const
+
+/** A pending decision offers at most this many options. */
+export const MAX_DECISION_OPTIONS = 5
 
 export type DecisionTextField = keyof typeof DECISION_LIMITS
 
@@ -17,14 +21,15 @@ const labels: Record<DecisionTextField, string> = {
   blastRadius: 'blast radius',
   sessionTitle: 'session title',
   workingDirectory: 'working directory',
+  optionLabel: 'option label',
 }
 
 /** Fields rendered on one line; their control characters include the line breaks. */
-const singleLineFields = new Set<DecisionTextField>(['sentence', 'sessionTitle', 'workingDirectory'])
+const singleLineFields = new Set<DecisionTextField>(['sentence', 'sessionTitle', 'workingDirectory', 'optionLabel'])
 const singleLineControl = /[\u0000-\u001f\u007f]/
 const multiLineControl = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/
 
-export interface MadeDecisionText {
+export interface DecisionText {
   sentence: string
   explanation: string
   alternatives: string
@@ -58,12 +63,25 @@ export function boundedDecisionText(field: DecisionTextField, value: unknown, re
   return value
 }
 
-/** Validate every text field of a made decision. All four are required. */
-export function madeDecisionText(input: { sentence: unknown; explanation: unknown; alternatives: unknown; blastRadius: unknown }): MadeDecisionText {
+/** Validate the four text fields of a decision. All four are required. */
+export function decisionText(input: { sentence: unknown; explanation: unknown; alternatives: unknown; blastRadius: unknown }): DecisionText {
   return {
     sentence: boundedDecisionText('sentence', input.sentence, true),
     explanation: boundedDecisionText('explanation', input.explanation, true),
     alternatives: boundedDecisionText('alternatives', input.alternatives, true),
     blastRadius: boundedDecisionText('blastRadius', input.blastRadius, true),
   }
+}
+
+/**
+ * Validate the options a pending decision offers: a list of at most five labels, each
+ * at most 120 characters. Zero options are allowed. Nothing is truncated or dropped.
+ */
+export function decisionOptions(value: unknown): string[] {
+  if (value === undefined) throw new TypeError('options is required; nothing was recorded')
+  if (!Array.isArray(value)) throw new TypeError('options must be a list; nothing was recorded')
+  if (value.length > MAX_DECISION_OPTIONS) {
+    throw new RangeError(`options has ${value.length} entries; the limit is ${MAX_DECISION_OPTIONS}. Remove the extra options and ask again; nothing was truncated or recorded`)
+  }
+  return value.map(label => boundedDecisionText('optionLabel', label, true))
 }

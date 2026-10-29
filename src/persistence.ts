@@ -6,6 +6,7 @@ import { ATTENTION_POLICY_VERSION } from './types.js'
 import { SUPPRESSIBLE_REASON_CODES } from './types.js'
 import { copyBackgroundWatch, isBackgroundWatch, MAX_BACKGROUND_WATCHES } from './adapters/background-jobs.js'
 import type { BackgroundWatch } from './adapters/background-jobs.js'
+import { DECISION_LIMITS, MAX_DECISION_OPTIONS } from './core/decisions.js'
 import { DeliveryLedger } from './core/delivery.js'
 import type { PersistedDeliveryEntry } from './core/delivery.js'
 import type { PersistedDedupeEntry } from './core/dedupe.js'
@@ -401,6 +402,13 @@ function isDecisionRecord(value: unknown): value is DecisionRecord {
     && (record.workingDirectory === undefined || typeof record.workingDirectory === 'string')
     && (record.sessionTitle === undefined || typeof record.sessionTitle === 'string')
     && (record.reviewState === undefined || record.reviewState === 'unreviewed' || record.reviewState === 'reviewed' || record.reviewState === 'disputed')
+    && (record.options === undefined || isDecisionOptions(record.options))
+}
+
+function isDecisionOptions(value: unknown): value is string[] {
+  return Array.isArray(value)
+    && value.length <= MAX_DECISION_OPTIONS
+    && value.every(label => typeof label === 'string' && label.trim().length > 0 && [...label].length <= DECISION_LIMITS.optionLabel)
 }
 
 function isSuppressibleReasonCode(value: unknown): value is SuppressibleReasonCode {
@@ -433,6 +441,7 @@ function isInboxStatus(value: string): value is InboxStatus {
     || value === 'muted'
     || value === 'recovered'
     || value === 'expired'
+    || value === 'cancelled'
 }
 
 function isTaskState(value: unknown): value is TaskState {

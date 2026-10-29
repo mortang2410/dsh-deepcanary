@@ -201,6 +201,36 @@ export function registerTools(ctx: unknown, service: DeepCanaryService): string[
     output: jsonOutput(),
     execute: async (_args, exec) => asJson(service.decisionsFor(callingSession(exec))),
   }))
+
+  register(defineTool({
+    name: 'deepcanary_request_decision',
+    description: 'Put a decision to the user that you cannot take alone. Returns the decision id at once; keep working on whatever does not depend on the answer. Text past a bound, or more than five options, is refused with an error, never cut.',
+    parameters: {
+      sentence: { type: 'string', required: true, description: 'The decision in one sentence, at most 200 characters.' },
+      explanation: { type: 'string', required: true, description: 'Why you need the user to decide, self-contained with no vague references, at most 4000 characters.' },
+      alternatives: { type: 'string', required: true, description: 'The alternatives you did not take and why, at most 4000 characters.' },
+      blastRadius: { type: 'string', required: true, description: 'What the decision touches, at most 2000 characters.' },
+      options: { type: 'array', required: true, items: { type: 'string' }, description: 'The options offered: at most five labels, each at most 120 characters.' },
+    },
+    output: jsonOutput(),
+    execute: async (args, exec) => asJson(await service.requestDecision(callingSession(exec), {
+      sentence: args.sentence,
+      explanation: args.explanation,
+      alternatives: args.alternatives,
+      blastRadius: args.blastRadius,
+      options: args.options,
+    })),
+  }))
+
+  register(defineTool({
+    name: 'deepcanary_cancel_decision',
+    description: 'Cancel a pending decision this session asked, so it leaves the pending view. Refused for another session, a made decision, or a decision already cancelled.',
+    parameters: {
+      id: { type: 'string', required: true, description: 'The decision id returned when it was requested.' },
+    },
+    output: jsonOutput(),
+    execute: async (args, exec) => asJson(service.cancelDecision(callingSession(exec), args.id)),
+  }))
   return names
 }
 

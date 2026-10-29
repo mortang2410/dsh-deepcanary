@@ -115,7 +115,8 @@ export interface AttentionVerdict {
   decisionTrace?: PolicyDecisionTrace
 }
 
-export type InboxStatus = 'open' | 'seen' | 'acknowledged' | 'snoozed' | 'muted' | 'recovered' | 'expired'
+/** `cancelled` is a pending decision its asking session withdrew; it leaves the pending view and never expires. */
+export type InboxStatus = 'open' | 'seen' | 'acknowledged' | 'snoozed' | 'muted' | 'recovered' | 'expired' | 'cancelled'
 /** Runtime task fact kept separate from the user's Inbox handling state. */
 export type TaskState = 'running' | 'waiting-human' | 'completed' | 'failed' | 'aborted' | 'disposed' | 'unknown'
 
@@ -148,6 +149,8 @@ export interface DecisionRecord {
   sessionTitle?: string
   /** Set for made decisions. */
   reviewState?: DecisionReviewState
+  /** Options a pending decision offers: at most five labels, each at most 120 characters. Absent on made decisions. */
+  options?: string[]
 }
 
 export interface InboxItem extends AttentionVerdict {

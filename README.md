@@ -79,6 +79,8 @@ Background jobs appear in the activity status while they run. Progress closes a 
 
 Inbox orders pending items by urgency, with questions and approvals ahead of routine updates. Further pages remain accessible through **Show more updates**. Choosing **Already resolved** records your feedback and marks that reminder handled; new questions retain their own reminder lifecycle.
 
+An agent can put a decision to you without stopping its turn. It calls `deepcanary_request_decision` with the decision in one sentence, an explanation, the alternatives considered, the blast radius and up to five options of at most 120 characters each, then keeps working. The card is labeled Pending decision and shows its options and the session it belongs to. It has no Acknowledge action and never expires; it stays pending until the asking session withdraws it with `deepcanary_cancel_decision`. Snooze and reminders work as they do for other items.
+
 **Remind later** offers 5, 15, 30 and 60 minutes. Scheduled cards show their return time and remain available for review. At the deadline, C1 returns to Inbox and C2 follows quiet hours and the rolling budget. C3 requires current authoritative evidence. A resolved or acknowledged item stays closed. Local profile state preserves deduplication, budget and notification status through plugin replacement. Actual OS delivery depends on the device and application lifecycle.
 
 The resizable Inbox has opaque light/dark surfaces, keyboard controls and expandable evidence. Navigation verifies the target in DSH's public session catalog. An unavailable target keeps its summary and explains its availability.

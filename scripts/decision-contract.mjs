@@ -9,8 +9,22 @@ import { loadRuntime } from './runtime-checkout.mjs'
 const runtime = await loadRuntime(process.env.DSH_RUNTIME)
 const { Context } = await runtime.importPackage('@deepseek-ai/cordis')
 const { SessionStore } = await runtime.importPackage('@deepseek-ai/dsh-session')
+const { CredentialProvider } = await runtime.importPackage('@deepseek-ai/dsh-credentials')
+const { default: WebServer } = await runtime.importPackage('@deepseek-ai/dsh-host-webserver')
+const connectionPlugin = await runtime.importPackage('@deepseek-ai/dsh-client-connection')
 const { DeepCanaryService } = await import('../lib/service.js')
 const { registerTools } = await import('../lib/tools.js')
+const { installWebRoutes } = await import('../lib/web.js')
+// Test-only credential store, the same as connection-contract: no real secret is involved.
+class TestCredentials extends CredentialProvider {
+  records = new Map()
+  async modifyRecord(key, mutate) {
+    const value = await mutate(this.records.get(key))
+    if (value === undefined) this.records.delete(key)
+    else this.records.set(key, value)
+    return value
+  }
+}
 
 const directory = await mkdtemp(path.join(process.env.DEEPCANARY_TEST_TMP ?? os.tmpdir(), 'deepcanary-decision-contract-'))
 const ctx = new Context()
@@ -76,6 +90,40 @@ try {
   bindTools()
   assert.deepEqual(service.inbox(20), before)
   checks.survivesRestart = true
+
+  // The restarted service, read through the authenticated state route: a pending decision
+  // appears with its owner and options, and leaves the view once it is cancelled.
+  fibers.push(await ctx.plugin(TestCredentials))
+  fibers.push(await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 }))
+  fibers.push(await ctx.plugin(connectionPlugin, { maxRequestBodyBytes: 64_000 }))
+  fibers.push(await ctx.plugin(pluginCtx => installWebRoutes(pluginCtx, service)))
+  const base = `http://127.0.0.1:${ctx.webServer.port}`
+  const disposeIndex = ctx.webServer.register({ kind: 'exact', path: '/', handler: (req, res) => {
+    if (ctx.connection.authorizeIndex(req, res)) { res.statusCode = 200; res.end('test index') }
+  } })
+  const exchange = await fetch(ctx.connection.authenticatedUrl(`${base}/`), { redirect: 'manual' })
+  const cookie = exchange.headers.get('set-cookie')?.split(';')[0]
+  assert.ok(cookie)
+  disposeIndex()
+  const headers = { cookie }
+  const readInbox = async () => {
+    const response = await fetch(`${base}/api/dsh-deepcanary/state`, { headers })
+    assert.equal(response.status, 200)
+    return (await response.json()).inbox
+  }
+  const requested = await tool('deepcanary_request_decision').execute(
+    { ...valid, options: ['Keep the store', 'Split the store'] },
+    { agent: { id: parent.id } },
+  )
+  const entry = (await readInbox()).find(item => item.id === requested.id)
+  assert.equal(entry?.sessionId, parent.id)
+  assert.equal(entry?.decision?.kind, 'pending')
+  assert.deepEqual(entry?.decision?.options, ['Keep the store', 'Split the store'])
+  checks.pendingReadThroughAuthenticatedRoute = true
+  const cancelled = await tool('deepcanary_cancel_decision').execute({ id: requested.id }, { agent: { id: parent.id } })
+  assert.equal(cancelled.status, 'cancelled')
+  assert.equal((await readInbox()).some(item => item.id === requested.id), false)
+  checks.pendingCancelLeavesView = true
 
   console.log(JSON.stringify({ passed: true, runtimeVersion: runtime.version, checks }, null, 2))
 } finally {

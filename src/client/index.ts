@@ -5,7 +5,7 @@ import type {
 } from 'react'
 import type { ConfigForm, ConfigFormSnapshot, SettingsPluginsTabOwnerProps } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { handleNotificationClick, positionSelectedAttention } from './attention-navigation.js'
-import { hasCatalogSession, openAttentionSession } from './session-navigation.js'
+import { decisionSessionLabel, hasCatalogSession, openAttentionSession } from './session-navigation.js'
 import { rendererCapabilities } from './capabilities.js'
 import { inboxStyles } from './inbox-styles.js'
 import { claimNotificationBatch } from './notification-dispatch.js'
@@ -57,6 +57,8 @@ type ClientItem = {
   targetAvailable?: boolean
   taskState?: 'running' | 'waiting-human' | 'completed' | 'failed' | 'aborted' | 'disposed' | 'unknown'
   feedback?: { useful: boolean; value?: 'useful' | 'not-relevant' | 'wrong-level' | 'already-resolved'; at: string }
+  /** Decision content; present only on decision items. Options are absent on made decisions. */
+  decision?: { kind: 'pending' | 'made'; sentence: string; explanation: string; options?: string[]; sessionTitle?: string }
   bundleCount: number
 }
 
@@ -304,6 +306,13 @@ const zh = {
   'item.reason.TASK_ABORTED': '会话被中止，可能需要确认是否继续。',
   'item.reason.COMPLETION_SUSPICIOUS': '任务看似完成，但最终证据仍值得检查。',
   'item.reason.HOST_STALL_RECOVERED': '会话已重新产生事件。',
+  'item.reason.DECISION_PENDING': '代理在等待你的决定，期间可继续其他工作。',
+  'item.reason.DECISION_MADE': '代理已按既定自主规则做出决定，可稍后复核。',
+  'item.decisionKind.pending': '待你决定',
+  'item.decisionKind.made': '已自行决定',
+  'item.decisionOptions': '可选项：{options}',
+  'item.decisionExplanation': '说明',
+  'item.decisionSession': '所属会话：{session}',
   'item.reason.unknown': '检测到需要关注的运行时事件。',
   'item.suggestion.HUMAN_APPROVAL_REQUIRED': '在 DSH 中查看待审批请求并决定是否允许。',
   'item.suggestion.HUMAN_QUESTION_PENDING': '准备好后，在 DSH 中回答待处理问题。',
@@ -394,6 +403,7 @@ const zh = {
   'notification.title.TASK_ABORTED': '任务已中止',
   'notification.title.COMPLETION_SUSPICIOUS': '完成结果待复核',
   'notification.title.HOST_STALL_RECOVERED': '会话已恢复',
+  'notification.title.DECISION_PENDING': '等待你的决定',
   'notification.bundle': '已合并 {count} 个相关事件。',
   'notification.bundleDetail': '已合并 {count} 个相关事件：{reasons}。',
   'item.unknownReason': '未知原因码：{code}',
@@ -526,6 +536,13 @@ const en = {
   'item.reason.TASK_ABORTED': 'The session was aborted and may need a follow-up decision.',
   'item.reason.COMPLETION_SUSPICIOUS': 'The task looks complete, but its final evidence is worth checking.',
   'item.reason.HOST_STALL_RECOVERED': 'The session has started producing events again.',
+  'item.reason.DECISION_PENDING': 'The agent is waiting for your decision and can keep working meanwhile.',
+  'item.reason.DECISION_MADE': 'The agent made this decision under its standing rules. Review it when convenient.',
+  'item.decisionKind.pending': 'Pending decision',
+  'item.decisionKind.made': 'Made decision',
+  'item.decisionOptions': 'Options: {options}',
+  'item.decisionExplanation': 'Explanation',
+  'item.decisionSession': 'Session: {session}',
   'item.reason.unknown': 'A runtime event needs your attention.',
   'item.suggestion.HUMAN_APPROVAL_REQUIRED': 'Review the pending request in DSH and decide whether to allow it.',
   'item.suggestion.HUMAN_QUESTION_PENDING': 'Answer the pending question in DSH when you are ready.',
@@ -616,6 +633,7 @@ const en = {
   'notification.title.TASK_ABORTED': 'Task was aborted',
   'notification.title.COMPLETION_SUSPICIOUS': 'Completion needs review',
   'notification.title.HOST_STALL_RECOVERED': 'Session recovered',
+  'notification.title.DECISION_PENDING': 'Your decision is needed',
   'notification.bundle': '{count} related events were grouped.',
   'notification.bundleDetail': '{count} related events were grouped: {reasons}.',
   'item.unknownReason': 'Unknown reason code: {code}',
@@ -642,6 +660,8 @@ const reasonKeys: Record<string, LocaleKey> = {
   TASK_ABORTED: 'item.reason.TASK_ABORTED',
   COMPLETION_SUSPICIOUS: 'item.reason.COMPLETION_SUSPICIOUS',
   HOST_STALL_RECOVERED: 'item.reason.HOST_STALL_RECOVERED',
+  DECISION_PENDING: 'item.reason.DECISION_PENDING',
+  DECISION_MADE: 'item.reason.DECISION_MADE',
 }
 
 const suggestionKeys: Record<string, LocaleKey> = {
@@ -675,6 +695,7 @@ const notificationTitleKeys: Record<string, LocaleKey> = {
   TASK_ABORTED: 'notification.title.TASK_ABORTED',
   COMPLETION_SUSPICIOUS: 'notification.title.COMPLETION_SUSPICIOUS',
   HOST_STALL_RECOVERED: 'notification.title.HOST_STALL_RECOVERED',
+  DECISION_PENDING: 'notification.title.DECISION_PENDING',
 }
 
 function interpolate(text: string, params: Record<string, unknown> | undefined): string {
@@ -1845,6 +1866,22 @@ function itemCard(item: ClientItem, state: ControllerState, t: Translate, contro
       createElement('time', { className: 'dsc-card-time', dateTime: item.lastReminderAt ?? item.occurredAt }, formatTime(item.lastReminderAt ?? item.occurredAt)),
     ),
   ]
+  if (item.decision !== undefined) {
+    const decision = item.decision
+    children.push(createElement('p', { className: 'dsc-decision-kind', 'data-kind': decision.kind, key: 'decision-kind' },
+      translate(t, decision.kind === 'pending' ? 'item.decisionKind.pending' : 'item.decisionKind.made')))
+    const session = decisionSessionLabel(item)
+    if (session !== undefined) children.push(createElement('p', { className: 'dsc-decision-session', key: 'decision-session' },
+      translate(t, 'item.decisionSession', { session })))
+    children.push(createElement('p', { className: 'dsc-decision-sentence', key: 'decision-sentence' }, decision.sentence))
+    if (decision.options !== undefined && decision.options.length > 0) {
+      children.push(createElement('p', { className: 'dsc-decision-options', key: 'decision-options' },
+        translate(t, 'item.decisionOptions', { options: decision.options.join(' · ') })))
+    }
+    children.push(createElement('details', { className: 'dsc-decision-explanation', key: 'decision-explanation' },
+      createElement('summary', null, translate(t, 'item.decisionExplanation')),
+      createElement('p', null, decision.explanation)))
+  }
   if (item.snoozedUntil !== undefined) children.push(createElement('p', { className: 'dsc-scheduled-time', key: 'scheduled-at' },
     translate(t, 'item.scheduledAt', { time: new Intl.DateTimeFormat(chineseLocale() ? 'zh-CN' : 'en-US', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(item.snoozedUntil)) })))
   else if (item.reminderPending === true) children.push(createElement('p', { className: 'dsc-card-suggestion', key: 'reminder-waiting' }, translate(t, 'item.reminderWaiting')))
@@ -1895,9 +1932,10 @@ function itemCard(item: ClientItem, state: ControllerState, t: Translate, contro
       ? actionButton(translate(t, (`item.open.${item.level}`) as LocaleKey), () => {
         void controller.jump(item.id)
       }, busy, true)
-      : actionButton(translate(t, 'item.acknowledge'), () => {
+      // A decision is never acknowledged, so a decision card offers no acknowledge button.
+      : item.decision === undefined ? actionButton(translate(t, 'item.acknowledge'), () => {
         void controller.action(item.id, { action: 'acknowledge' })
-      }, busy, true),
+      }, busy, true) : null,
     createElement('details', { className: 'dsc-more', key: 'snooze', 'data-deepcanary-snooze-menu': true,
       onClick: (event: ReactMouseEvent<HTMLDetailsElement>) => {
         if ((event.target as Element).closest('button')) event.currentTarget.open = false
@@ -1912,11 +1950,11 @@ function itemCard(item: ClientItem, state: ControllerState, t: Translate, contro
   if (item.status === 'snoozed') actions.push(actionButton(translate(t, 'item.unsnooze'), () => {
     void controller.action(item.id, { action: 'unsnooze' })
   }, busy))
-  const moreActions: ReactNode[] = [
+  const moreActions: ReactNode[] = item.decision === undefined ? [
     actionButton(translate(t, 'item.acknowledge'), () => {
       void controller.action(item.id, { action: 'acknowledge' })
     }, busy),
-  ]
+  ] : []
   const mutedUntil = item.mutedUntil === undefined ? Number.NaN : Date.parse(item.mutedUntil)
   moreActions.push(Number.isFinite(mutedUntil) && mutedUntil > Date.now()
     ? actionButton(translate(t, 'item.unmute'), () => {
@@ -1950,6 +1988,7 @@ function itemCard(item: ClientItem, state: ControllerState, t: Translate, contro
     key: item.id,
     'data-deepcanary-item': item.id,
     'data-selected': selected,
+    'data-kind': item.decision?.kind ?? 'attention',
   }, ...children)
 }
 

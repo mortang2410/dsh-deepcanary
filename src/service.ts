@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
-import { boundedDecisionText, madeDecisionText } from './core/decisions.js'
+import { boundedDecisionText, decisionOptions, decisionText } from './core/decisions.js'
 import { DedupeLedger, InterruptBudget } from './core/dedupe.js'
 import { DeliveryLedger } from './core/delivery.js'
 import type { DeliveryClaimOutcome } from './core/delivery.js'
@@ -52,6 +52,7 @@ import type {
   DryRunSignalInput,
   EvidenceAuthority,
   FeedbackValue,
+  DecisionRecord,
   InboxItem,
   PolicyDecisionTrace,
   PublicInboxItem,
@@ -590,11 +591,9 @@ export class DeepCanaryService {
   async recordMadeDecision(ownerSessionId: string, input: { sentence: unknown; explanation: unknown; alternatives: unknown; blastRadius: unknown; sessionTitle?: unknown }): Promise<PublicInboxItem> {
     await this.ready
     if (this.disposed) throw new Error('DeepCanary is shutting down; nothing was recorded')
-    const text = madeDecisionText(input)
+    const text = decisionText(input)
     const sessionTitle = boundedDecisionText('sessionTitle', input.sessionTitle, false)
-    const lineage = this.adapter.sessionLineage(ownerSessionId)
-    if (lineage === undefined) throw new Error('The calling session is not known to the host; nothing was recorded')
-    const workingDirectory = boundedDecisionText('workingDirectory', lineage.workingDirectory, false)
+    const owner = this.decisionOwner(ownerSessionId)
     const id = randomUUID()
     const item: InboxItem = {
       schemaVersion: PROTOCOL_VERSION,
@@ -618,9 +617,7 @@ export class DeepCanaryService {
       decision: {
         kind: 'made',
         ...text,
-        ...(lineage.parentSessionId === undefined ? {} : { parentSessionId: lineage.parentSessionId }),
-        delegationDepth: lineage.delegationDepth,
-        ...(workingDirectory === undefined ? {} : { workingDirectory }),
+        ...owner,
         ...(sessionTitle === undefined ? {} : { sessionTitle }),
         reviewState: 'unreviewed',
       },
@@ -631,6 +628,81 @@ export class DeepCanaryService {
     this.queueSave()
     this.syncSupervisor()
     return this.toPublic(item)
+  }
+
+  /**
+   * Put a decision to the user that the agent cannot take alone. It returns at once with
+   * its id, and the agent keeps working. The entry stays pending until the asking session
+   * cancels it; nothing else resolves it, and it never expires. Text or options past a bound
+   * are refused, and nothing is stored when any check fails.
+   */
+  async requestDecision(ownerSessionId: string, input: { sentence: unknown; explanation: unknown; alternatives: unknown; blastRadius: unknown; options: unknown }): Promise<PublicInboxItem> {
+    await this.ready
+    if (this.disposed) throw new Error('DeepCanary is shutting down; nothing was recorded')
+    const text = decisionText(input)
+    const options = decisionOptions(input.options)
+    const owner = this.decisionOwner(ownerSessionId)
+    const id = randomUUID()
+    // A pending decision uses the existing attention levels: C2 may interrupt under the
+    // default notification level, and policy only ever downgrades it.
+    const verdict = this.applyPolicy({
+      schemaVersion: PROTOCOL_VERSION,
+      eventId: id,
+      level: 'C2',
+      action: 'INTERRUPT',
+      confidence: 1,
+      reasonCode: 'DECISION_PENDING',
+      messageKey: 'item.reason.DECISION_PENDING',
+      policyVersion: ATTENTION_POLICY_VERSION,
+      why: text.sentence,
+      evidence: [],
+    }, Date.now())
+    const item: InboxItem = {
+      ...verdict,
+      id,
+      sessionId: ownerSessionId,
+      sessionRef: hashMetadata(ownerSessionId),
+      occurredAt: nowIso(),
+      status: 'open',
+      targetAvailable: true,
+      bundleCount: 1,
+      reasonCodes: ['DECISION_PENDING'],
+      decision: { kind: 'pending', ...text, options, ...owner },
+    }
+    this.items.unshift(item)
+    if (this.items.length > this.config.maxInboxItems) this.items.splice(0, this.items.length, ...retainInboxItems(this.items, this.config.maxInboxItems))
+    this.bumpRevision()
+    this.queueSave()
+    this.syncSupervisor()
+    return this.toPublic(item)
+  }
+
+  /** Withdraw a pending decision. Only the session that asked may cancel it, and only while it is pending. */
+  cancelDecision(ownerSessionId: string, id: string): PublicInboxItem {
+    const item = this.find(id)
+    if (item?.decision?.kind !== 'pending' || item.sessionId !== ownerSessionId || item.status === 'cancelled') {
+      throw new Error('No pending decision with that id belongs to this session; nothing was cancelled')
+    }
+    item.status = 'cancelled'
+    delete item.snoozedUntil
+    delete item.mutedUntil
+    delete item.reminderPending
+    this.bumpRevision()
+    this.queueSave()
+    this.syncSupervisor()
+    return this.toPublic(item)
+  }
+
+  /** Lineage and working directory of the calling session, bounded for storage. */
+  private decisionOwner(ownerSessionId: string): Pick<DecisionRecord, 'parentSessionId' | 'delegationDepth' | 'workingDirectory'> {
+    const lineage = this.adapter.sessionLineage(ownerSessionId)
+    if (lineage === undefined) throw new Error('The calling session is not known to the host; nothing was recorded')
+    const workingDirectory = boundedDecisionText('workingDirectory', lineage.workingDirectory, false)
+    return {
+      ...(lineage.parentSessionId === undefined ? {} : { parentSessionId: lineage.parentSessionId }),
+      delegationDepth: lineage.delegationDepth,
+      ...(workingDirectory === undefined ? {} : { workingDirectory }),
+    }
   }
 
   /** The owning session's own decisions, newest first. Read-only. */
@@ -701,7 +773,7 @@ export class DeepCanaryService {
 
   seen(id: string): boolean {
     const item = this.find(id)
-    if (!item || item.status === 'acknowledged' || item.status === 'muted' || item.status === 'recovered' || item.status === 'expired') return false
+    if (!item || item.status === 'acknowledged' || item.status === 'muted' || item.status === 'recovered' || item.status === 'expired' || item.status === 'cancelled') return false
     if (item.status === 'seen') return false
     if (item.status !== 'snoozed') {
       item.status = 'seen'
@@ -733,7 +805,7 @@ export class DeepCanaryService {
 
   snooze(id: string, minutes = 30): boolean {
     const item = this.find(id)
-    if (!item || item.status === 'acknowledged' || item.status === 'muted' || item.status === 'recovered' || item.status === 'expired') return false
+    if (!item || item.status === 'acknowledged' || item.status === 'muted' || item.status === 'recovered' || item.status === 'expired' || item.status === 'cancelled') return false
     if (notificationGeneration(item) >= MAX_NOTIFICATION_GENERATION) return false
     const bounded = Number.isFinite(minutes) ? Math.max(1, Math.min(24 * 60, Math.trunc(minutes))) : 30
     item.status = 'snoozed'
@@ -763,7 +835,7 @@ export class DeepCanaryService {
 
   mute(id: string): boolean {
     const item = this.find(id)
-    if (!item || item.status === 'muted' || item.status === 'recovered' || item.status === 'expired') return false
+    if (!item || item.status === 'muted' || item.status === 'recovered' || item.status === 'expired' || item.status === 'cancelled') return false
     const now = Date.now()
     const currentMute = item.mutedUntil === undefined ? Number.NaN : Date.parse(item.mutedUntil)
     if (Number.isFinite(currentMute) && currentMute > now) return false
@@ -778,7 +850,7 @@ export class DeepCanaryService {
   /** End a temporary mute immediately while retaining the Inbox item. */
   unmute(id: string): boolean {
     const item = this.find(id)
-    if (!item || item.status === 'recovered' || item.status === 'expired') return false
+    if (!item || item.status === 'recovered' || item.status === 'expired' || item.status === 'cancelled') return false
     const until = item.mutedUntil === undefined ? Number.NaN : Date.parse(item.mutedUntil)
     if (item.status !== 'muted' && (!Number.isFinite(until) || until <= Date.now())) return false
     if (item.status === 'muted') item.status = 'open'

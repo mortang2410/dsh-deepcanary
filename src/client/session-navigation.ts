@@ -38,3 +38,11 @@ export function openAttentionSession(ctx: SessionNavigationContext, sessionId: s
     return false
   }
 }
+
+/**
+ * The session a decision card names: the host's session title when it supplied one,
+ * otherwise the session ID. An empty title falls back to the ID as well.
+ */
+export function decisionSessionLabel(item: { sessionId?: string; decision?: { sessionTitle?: string } }): string | undefined {
+  return item.decision?.sessionTitle || item.sessionId
+}

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased: pending decisions
+
+- Add `deepcanary_request_decision`. An agent uses it to put a decision to you and gets its id back at once, so its turn continues. The decision shows one sentence, its explanation, the alternatives, the blast radius, its options and the session it belongs to. It accepts up to five options of at most 120 characters each, and refuses a sixth option or a longer label rather than cutting it.
+- Add `deepcanary_cancel_decision`. The session that asked can withdraw a pending decision, and a cancelled decision leaves the pending view.
+- Pending decisions are labeled Pending decision in the Inbox, name their session, and keep their options across a restart. They have no Acknowledge action and never expire. Snooze and reminders use the existing machinery.
+
 ## 0.1.6-rc.4 — readable settings actions across themes
 
 - Use a blue Save button with white text in both themes. This preserves readable contrast when the Host's dark-theme label and background tokens resolve to similar colors.

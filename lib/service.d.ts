@@ -86,6 +86,23 @@ export declare class DeepCanaryService {
         blastRadius: unknown;
         sessionTitle?: unknown;
     }): Promise<PublicInboxItem>;
+    /**
+     * Put a decision to the user that the agent cannot take alone. It returns at once with
+     * its id, and the agent keeps working. The entry stays pending until the asking session
+     * cancels it; nothing else resolves it, and it never expires. Text or options past a bound
+     * are refused, and nothing is stored when any check fails.
+     */
+    requestDecision(ownerSessionId: string, input: {
+        sentence: unknown;
+        explanation: unknown;
+        alternatives: unknown;
+        blastRadius: unknown;
+        options: unknown;
+    }): Promise<PublicInboxItem>;
+    /** Withdraw a pending decision. Only the session that asked may cancel it, and only while it is pending. */
+    cancelDecision(ownerSessionId: string, id: string): PublicInboxItem;
+    /** Lineage and working directory of the calling session, bounded for storage. */
+    private decisionOwner;
     /** The owning session's own decisions, newest first. Read-only. */
     decisionsFor(ownerSessionId: string): PublicInboxItem[];
     /** Record one redacted decision outcome for a local, controlled, or replay trial. */

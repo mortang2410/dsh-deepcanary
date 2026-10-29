@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { retainInboxItems } from '../src/core/inbox-retention.js'
 import { DeepCanaryService } from '../src/service.js'
 import { registerTools } from '../src/tools.js'
@@ -29,7 +29,7 @@ const valid = {
   blastRadius: 'Only the inbox persistence path.',
 }
 
-describe('made decisions', () => {
+describe('decisions', () => {
   const directories: string[] = []
   const services: DeepCanaryService[] = []
 
@@ -161,5 +161,140 @@ describe('made decisions', () => {
     expect(kept).toContain(decision)
     expect(kept.filter(item => item.decision === undefined)).toHaveLength(2)
     expect(retainInboxItems(attention, 2)).toHaveLength(2)
+  })
+
+  describe('pending decisions', () => {
+    const options = ['Keep the store', 'Split the store']
+
+    it('requests a pending decision and returns its id at once', async () => {
+      const { service } = await open({ top: { cwd } })
+      const requested = await service.requestDecision('top', { ...valid, options })
+      expect(requested.id).toEqual(expect.any(String))
+      expect(service.snapshot().inbox.map(item => item.id)).toEqual([requested.id])
+      expect(service.snapshot().inbox[0]).toMatchObject({ sessionId: 'top', level: 'C2', action: 'INTERRUPT', reasonCode: 'DECISION_PENDING', notificationEligible: true })
+      expect(service.snapshot().inbox[0]?.decision).toEqual({ kind: 'pending', ...valid, options, delegationDepth: 0, workingDirectory: cwd })
+    })
+
+    it('refuses a sixth option or a label past 120 characters, and stores nothing', async () => {
+      const { service } = await open({ top: { cwd } })
+      await expect(service.requestDecision('top', { ...valid, options: ['a', 'b', 'c', 'd', 'e', 'f'] })).rejects.toThrow('the limit is 5')
+      await expect(service.requestDecision('top', { ...valid, options: ['a'.repeat(121)] })).rejects.toThrow('the limit is 120')
+      expect(service.inbox(10)).toEqual([])
+      const atLimit = await service.requestDecision('top', { ...valid, options: ['b'.repeat(120), 'c', 'd', 'e', 'f'] })
+      expect(atLimit.decision?.options?.[0]).toHaveLength(120)
+      expect(atLimit.decision?.options).toHaveLength(5)
+    })
+
+    it('keeps the option list across a restart of the same state directory', async () => {
+      const headers = { top: { cwd } }
+      const { service, directory } = await open(headers)
+      const requested = await service.requestDecision('top', { ...valid, options })
+      await service.dispose()
+      const restarted = await open(headers, directory)
+      expect(restarted.service.inbox(5)).toEqual([requested])
+    })
+
+    it('lets only the asking session cancel, and a cancelled decision leaves the pending view', async () => {
+      const { service } = await open({ top: { cwd }, other: { cwd } })
+      const requested = await service.requestDecision('top', { ...valid, options })
+      expect(() => service.cancelDecision('other', requested.id)).toThrow('belongs to this session')
+      const cancelled = service.cancelDecision('top', requested.id)
+      expect(cancelled).toMatchObject({ id: requested.id, status: 'cancelled' })
+      expect(service.snapshot().inbox).toEqual([])
+      expect(service.snapshot().scheduled ?? []).toEqual([])
+      expect(service.decisionsFor('top')).toEqual([cancelled])
+      expect(() => service.cancelDecision('top', requested.id)).toThrow('belongs to this session')
+    })
+
+    it('refuses to cancel a made decision, and refuses seen, snooze, mute and unmute on a cancelled one', async () => {
+      const { service } = await open({ top: { cwd } })
+      const made = await service.recordMadeDecision('top', valid)
+      const requested = await service.requestDecision('top', { ...valid, sentence: 'Use a second store.', options })
+      expect(() => service.cancelDecision('top', made.id)).toThrow('belongs to this session')
+      service.cancelDecision('top', requested.id)
+      expect(service.seen(requested.id)).toBe(false)
+      expect(service.snooze(requested.id, 15)).toBe(false)
+      expect(service.mute(requested.id)).toBe(false)
+      expect(service.unmute(requested.id)).toBe(false)
+      expect(service.snapshot().inbox.map(item => item.id)).toEqual([made.id])
+      expect(service.snapshot().scheduled ?? []).toEqual([])
+    })
+
+    it('exposes the request and cancel tools under the calling session, and refuses a call with no session', async () => {
+      const { service } = await open({ top: { cwd } })
+      const definitions = new Map<string, { execute: (args: unknown, exec: unknown) => Promise<unknown> }>()
+      registerTools({ tools: { register: (definition: { name: string }) => definitions.set(definition.name, definition as never) } }, service)
+      const request = definitions.get('deepcanary_request_decision')!
+      const cancel = definitions.get('deepcanary_cancel_decision')!
+      const requested = await request.execute({ ...valid, options }, { agent: { id: 'top' } }) as { id: string; status: string }
+      expect(requested.status).toBe('open')
+      await expect(request.execute({ ...valid, options: ['a', 'b', 'c', 'd', 'e', 'f'] }, { agent: { id: 'top' } })).rejects.toThrow('the limit is 5')
+      await expect(request.execute({ ...valid, options }, {})).rejects.toThrow('belong to the calling agent session')
+      expect(await cancel.execute({ id: requested.id }, { agent: { id: 'top' } })).toMatchObject({ id: requested.id, status: 'cancelled' })
+    })
+
+    it('refuses acknowledge on a pending decision, and its snooze and reminder survive the attempt', async () => {
+      const { service } = await open({ top: { cwd } })
+      const requested = await service.requestDecision('top', { ...valid, options })
+      expect(service.snooze(requested.id, 15)).toBe(true)
+      expect(service.acknowledge(requested.id)).toBe(false)
+      expect(service.snapshot().scheduled?.[0]).toMatchObject({ id: requested.id, status: 'snoozed', reminderPending: true })
+    })
+
+    it('brings a snoozed pending decision back to the pending view at its reminder time', async () => {
+      const { service } = await open({ top: { cwd } })
+      let now = Date.parse('2026-10-29T08:00:00.000Z')
+      const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
+      try {
+        const requested = await service.requestDecision('top', { ...valid, options })
+        expect(service.snooze(requested.id, 5)).toBe(true)
+        expect(service.snapshot().inbox).toEqual([])
+        now += 5 * 60_000 + 1
+        expect(service.snapshot().inbox[0]).toMatchObject({ id: requested.id, status: 'open', notificationEligible: true })
+      } finally {
+        clock.mockRestore()
+      }
+    })
+
+    it('never expires a pending decision, while an attention item of the same session does', async () => {
+      vi.useFakeTimers()
+      const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-decision-expiry-'))
+      directories.push(directory)
+      vi.setSystemTime(new Date('2026-10-29T00:00:00.000Z'))
+      try {
+        const first = new DeepCanaryService(hostWith({ top: { cwd } }) as never, { stateDir: directory })
+        services.push(first)
+        await first.ready
+        const requested = await first.requestDecision('top', { ...valid, options })
+        const question = await first.ingest({
+          schemaVersion: 1,
+          id: 'question-1',
+          occurredAt: '2026-10-29T00:00:00.000Z',
+          source: 'session',
+          kind: 'HUMAN_QUESTION_PENDING',
+          sessionId: 'top',
+          severityHint: 3,
+          evidence: [{ type: 'session-event', authority: 'host', ref: 'question', summary: 'the agent is waiting for an answer' }],
+          dedupeKey: 'question:top',
+          data: {},
+        })
+        expect(question).toBeDefined()
+        await first.dispose()
+
+        const second = new DeepCanaryService({ logger: {}, sessions: { list: () => [] } } as never, { stateDir: directory })
+        services.push(second)
+        await second.ready
+        second.start()
+        await second.adapter.start()
+        second.inbox(10)
+        vi.advanceTimersByTime(31_000)
+        await Promise.resolve()
+        const items = second.inbox(10)
+        expect(items.find(item => item.id === question?.id)).toMatchObject({ status: 'expired' })
+        expect(items.find(item => item.id === requested.id)).toMatchObject({ status: 'open', targetAvailable: false })
+      } finally {
+        vi.useRealTimers()
+      }
+    })
   })
 })
