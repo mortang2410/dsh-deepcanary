@@ -627,7 +627,6 @@ export class DeepCanaryService {
     }
     this.items.unshift(item)
     if (this.items.length > this.config.maxInboxItems) this.items.splice(0, this.items.length, ...retainInboxItems(this.items, this.config.maxInboxItems))
-    if (!this.items.includes(item)) throw new Error('The inbox is full of items that outrank this decision; nothing was recorded')
     this.bumpRevision()
     this.queueSave()
     this.syncSupervisor()

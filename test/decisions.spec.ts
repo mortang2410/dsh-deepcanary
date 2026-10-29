@@ -2,8 +2,10 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { retainInboxItems } from '../src/core/inbox-retention.js'
 import { DeepCanaryService } from '../src/service.js'
 import { registerTools } from '../src/tools.js'
+import type { InboxItem } from '../src/types.js'
 
 interface FakeHeader {
   cwd?: string
@@ -143,5 +145,21 @@ describe('made decisions', () => {
     expect(item.decision.workingDirectory).toBe(cwd)
     expect(await definitions.get('deepcanary_list_decisions')!.execute({}, { agent: { id: 'top' } })).toEqual([item])
     await expect(record.execute(valid, {})).rejects.toThrow('belong to the calling agent session')
+  })
+
+  // Every retention site (insert, ingest, restore, settings change) calls this function,
+  // so its rule is the rule the service applies. Only the fields the ranker reads are set.
+  it('keeps decisions through an attention overflow and still caps attention items', () => {
+    const decision = { id: 'decision', decision: { kind: 'made' }, status: 'open', level: 'C1', occurredAt: '2026-01-01T00:00:00.000Z' } as InboxItem
+    const attention = Array.from({ length: 5 }, (_, index) => ({
+      id: `attention-${index}`,
+      status: 'open',
+      level: 'C1',
+      occurredAt: new Date(Date.parse('2026-01-01T00:00:00.000Z') + index).toISOString(),
+    }) as InboxItem)
+    const kept = retainInboxItems([decision, ...attention], 2)
+    expect(kept).toContain(decision)
+    expect(kept.filter(item => item.decision === undefined)).toHaveLength(2)
+    expect(retainInboxItems(attention, 2)).toHaveLength(2)
   })
 })
