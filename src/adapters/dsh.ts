@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { isMeaningfulSessionEvent, recordToolResult, toolCallIdOf, toolClassForName, toolClassForActiveTools } from '../providers.js'
 import type { SessionEventLike, SessionLike, ToolClass, ToolFailureState, TurnState } from '../providers.js'
@@ -68,6 +69,8 @@ interface ContextLike {
   sessions?: SessionStoreLike
   get?: (name: string) => unknown
   sessionProjections?: unknown
+  agents?: { get?: (id: string) => { session: unknown; followup: (message: unknown) => unknown } | undefined }
+  inject?: (services: string[], callback: (ctx: ContextLike) => unknown) => unknown
 }
 
 interface DshAdapterOptions {
@@ -79,6 +82,7 @@ interface DshAdapterOptions {
 interface SessionStoreLike {
   list?: () => readonly unknown[] | Promise<readonly unknown[]>
   get?: (id: string) => unknown
+  flush?: (session: unknown) => Promise<boolean>
 }
 
 /** Host lineage of one session, read from its creation header. */
@@ -104,6 +108,7 @@ export class ContextDshAdapter implements DshAdapter {
   readonly hostVersion: string
   private readonly ctx: ContextLike
   private readonly listeners = new Set<(event: DeepCanaryEvent) => void>()
+  private agents: ContextLike['agents']
   private readonly snapshots = new Map<string, SessionSnapshot>()
   private readonly runtimeHealth: () => Promise<RuntimeHealth>
   private readonly sessionStore: SessionStoreLike | undefined
@@ -128,6 +133,11 @@ export class ContextDshAdapter implements DshAdapter {
 
   constructor(ctx: Context, options: DshAdapterOptions = {}) {
     this.ctx = ctx as unknown as ContextLike
+    if (this.ctx.inject === undefined) this.agents = this.ctx.agents
+    else this.ctx.inject(['agents'], agentCtx => {
+      this.agents = agentCtx.agents
+      return () => { this.agents = undefined }
+    })
     this.hostVersion = options.hostVersion ?? process.env.DSH_VERSION ?? 'unknown'
     this.sessionStore = options.sessionStore ?? this.ctx.sessions ?? (this.ctx.get?.('sessions') as SessionStoreLike | undefined)
     this.runtimeHealth = options.runtimeHealth ?? (async () => ({
@@ -178,6 +188,18 @@ export class ContextDshAdapter implements DshAdapter {
 
   async getSessionSnapshot(sessionId: string): Promise<SessionSnapshot | null> {
     return this.snapshots.get(sessionId) ?? null
+  }
+
+  /** Queue an ordinary user turn on a live agent and flush the session checkpoint. */
+  async deliverDecision(sessionId: string, text: string): Promise<boolean> {
+    const agent = this.agents?.get?.(sessionId)
+    if (agent === undefined) return false
+    if (typeof this.sessionStore?.flush !== 'function') throw new Error('Session flush is unavailable')
+    const content = Object.freeze([Object.freeze({ type: 'text', text })])
+    const message = Object.freeze({ id: randomUUID(), role: 'user', content, source: Object.freeze({ kind: 'user' }) })
+    await agent.followup(message)
+    await this.sessionStore.flush(agent.session)
+    return true
   }
 
   /** Lineage the host recorded for a live session; undefined when the host does not know it. */

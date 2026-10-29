@@ -28,6 +28,7 @@ export declare class DeepCanaryService {
     private readonly ctx;
     private readonly sessions;
     private readonly items;
+    private readonly decisionDeliveries;
     private readonly suppressedReasons;
     private readonly dedupe;
     private readonly budget;
@@ -88,8 +89,8 @@ export declare class DeepCanaryService {
     }): Promise<PublicInboxItem>;
     /**
      * Put a decision to the user that the agent cannot take alone. It returns at once with
-     * its id, and the agent keeps working. The entry stays pending until the asking session
-     * cancels it; nothing else resolves it, and it never expires. Text or options past a bound
+     * its id, and the agent keeps working. The entry stays pending until answered or cancelled
+     * and never expires. Text or options past a bound
      * are refused, and nothing is stored when any check fails.
      */
     requestDecision(ownerSessionId: string, input: {
@@ -99,6 +100,11 @@ export declare class DeepCanaryService {
         blastRadius: unknown;
         options: unknown;
     }): Promise<PublicInboxItem>;
+    /** Commit one answer before attempting delivery to the owning session or its parent. */
+    answerDecision(id: string, input: unknown): Promise<PublicInboxItem>;
+    /** Attempt once now; ticket 04b can extend this seam to flush on session start. */
+    private flushPendingDelivery;
+    private observeDecisionDelivery;
     /** Withdraw a pending decision. Only the session that asked may cancel it, and only while it is pending. */
     cancelDecision(ownerSessionId: string, id: string): PublicInboxItem;
     /** Lineage and working directory of the calling session, bounded for storage. */
@@ -186,6 +192,7 @@ export declare class DeepCanaryService {
     private safeVerdict;
     private isQuietHours;
     private toPublic;
+    private publicDecision;
     private isPending;
     private reminderAuthorityReady;
     private notificationEligible;

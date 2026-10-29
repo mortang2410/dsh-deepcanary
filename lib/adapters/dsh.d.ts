@@ -63,6 +63,7 @@ interface DshAdapterOptions {
 interface SessionStoreLike {
     list?: () => readonly unknown[] | Promise<readonly unknown[]>;
     get?: (id: string) => unknown;
+    flush?: (session: unknown) => Promise<boolean>;
 }
 /** Host lineage of one session, read from its creation header. */
 export interface SessionLineage {
@@ -76,6 +77,7 @@ export declare class ContextDshAdapter implements DshAdapter {
     readonly hostVersion: string;
     private readonly ctx;
     private readonly listeners;
+    private agents;
     private readonly snapshots;
     private readonly runtimeHealth;
     private readonly sessionStore;
@@ -94,6 +96,8 @@ export declare class ContextDshAdapter implements DshAdapter {
     getReconciliationStatus(): ReconciliationStatus;
     subscribe(listener: (event: DeepCanaryEvent) => void): Disposable;
     getSessionSnapshot(sessionId: string): Promise<SessionSnapshot | null>;
+    /** Queue an ordinary user turn on a live agent and flush the session checkpoint. */
+    deliverDecision(sessionId: string, text: string): Promise<boolean>;
     /** Lineage the host recorded for a live session; undefined when the host does not know it. */
     sessionLineage(sessionId: string): SessionLineage | undefined;
     getRuntimeHealth(): Promise<RuntimeHealth>;

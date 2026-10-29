@@ -108,6 +108,12 @@ export interface DecisionRecord {
     reviewState?: DecisionReviewState;
     /** Options a pending decision offers: at most five labels, each at most 120 characters. Absent on made decisions. */
     options?: string[];
+    /** Answer delivery remains queued until its token appears in the target session. */
+    answer?: string;
+    answerAt?: string;
+    deliveryToken?: string;
+    deliveryState?: 'queued' | 'delivered';
+    deliveredAt?: string;
 }
 export interface InboxItem extends AttentionVerdict {
     id: string;

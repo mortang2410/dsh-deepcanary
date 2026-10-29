@@ -166,13 +166,105 @@ describe('decisions', () => {
   describe('pending decisions', () => {
     const options = ['Keep the store', 'Split the store']
 
+    it('queues an answer when its known target is not live and refuses a second answer', async () => {
+      const { service } = await open({ top: { cwd } })
+      const requested = await service.requestDecision('top', { ...valid, options })
+      expect(requested.decision?.deliveryState).toBe('queued')
+      const answered = await service.answerDecision(requested.id, 'Keep the store')
+      expect(answered.decision).toMatchObject({ answer: 'Keep the store', deliveryState: 'queued' })
+      await expect(service.answerDecision(requested.id, 'Split the store')).rejects.toThrow(/already been answered/i)
+    })
+
+    it('refuses an overlong answer, accepts 8000 characters, and keeps the committed answer across restart', async () => {
+      const headers = { top: { cwd } }
+      const { service, directory } = await open(headers)
+      const requested = await service.requestDecision('top', { ...valid, options })
+      await expect(service.answerDecision(requested.id, '😀'.repeat(8001))).rejects.toThrow('the limit is 8000')
+      expect(service.decisionsFor('top')[0]?.decision?.answer).toBeUndefined()
+      const answer = '😀'.repeat(8000)
+      const accepted = await service.answerDecision(requested.id, answer)
+      expect(accepted.decision).toMatchObject({ answer, deliveryState: 'queued' })
+      await service.dispose()
+      const restarted = await open(headers, directory)
+      expect(restarted.service.decisionsFor('top')[0]?.decision).toMatchObject({ answer, deliveryState: 'queued' })
+      await expect(restarted.service.answerDecision(requested.id, 'Again')).rejects.toThrow(/already been answered/)
+    })
+
+    it('skips an in-flight delivery and releases its claim when the send fails', async () => {
+      const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-decision-claim-'))
+      directories.push(directory)
+      let signalStarted!: () => void
+      let rejectSend!: (error: Error) => void
+      const started = new Promise<void>(resolve => { signalStarted = resolve })
+      const blocked = new Promise<void>((_resolve, reject) => { rejectSend = reject })
+      const followup = vi.fn().mockImplementationOnce(() => { signalStarted(); return blocked }).mockResolvedValue(undefined)
+      const session = { id: 'top', header: { cwd } }
+      const host = { logger: {}, sessions: { get: () => session, flush: async () => true }, agents: { get: () => ({ session, followup }) } }
+      const service = new DeepCanaryService(host as never, { stateDir: directory })
+      services.push(service)
+      await service.ready
+      const requested = await service.requestDecision('top', { ...valid, options })
+      const answer = service.answerDecision(requested.id, 'Keep the store')
+      await started
+      const seam = service as unknown as { items: InboxItem[]; flushPendingDelivery(item: InboxItem): Promise<void> }
+      const item = seam.items.find(candidate => candidate.id === requested.id)!
+      await seam.flushPendingDelivery(item)
+      expect(followup).toHaveBeenCalledTimes(1)
+      rejectSend(new Error('send failed'))
+      expect((await answer).decision?.deliveryState).toBe('queued')
+      await seam.flushPendingDelivery(item)
+      expect(followup).toHaveBeenCalledTimes(2)
+      expect(service.decisionsFor('top')[0]?.decision?.deliveryState).toBe('queued')
+    })
+
+    it('observes only a token-bearing user message on the routed parent and preserves queued on failure', async () => {
+      const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-decision-delivery-'))
+      directories.push(directory)
+      const listeners = new Map<string, (...args: unknown[]) => void>()
+      const session = { id: 'top', header: { cwd } }
+      const child = { id: 'child', header: { cwd, parentSession: 'top', delegationDepth: 1 } }
+      const sent: Array<{ role: string; content: Array<{ text: string }>; source: { kind: string } }> = []
+      const followup = vi.fn((message: typeof sent[number]) => { sent.push(message) })
+      const host = {
+        logger: {},
+        on: (event: string, listener: (...args: unknown[]) => void) => { listeners.set(event, listener) },
+        sessions: { get: (id: string) => id === 'top' ? session : id === 'child' ? child : undefined, list: () => [session, child], flush: async () => true },
+        agents: { get: (id: string) => id === 'top' ? { session, followup } : undefined },
+      }
+      const service = new DeepCanaryService(host as never, { stateDir: directory })
+      services.push(service)
+      await service.ready
+      service.start()
+      await service.adapter.start()
+      const requested = await service.requestDecision('child', { ...valid, options })
+      const answered = await service.answerDecision(requested.id, 'Keep the store')
+      expect(answered.decision?.deliveryState).toBe('queued')
+      expect(followup).toHaveBeenCalledTimes(1)
+      expect(sent[0]).toMatchObject({ role: 'user', source: { kind: 'user' } })
+      expect(sent[0]?.content[0]?.text).toMatch(/Delivery token: [0-9a-f-]{36}/)
+      expect(answered.decision?.deliveryToken).toBeUndefined()
+      expect(sent[0]?.content[0]?.text).toContain('idempotency key')
+      const emit = (target: unknown, message: unknown) => listeners.get('session/event')?.(target, { type: 'user/message', data: message })
+      emit(session, { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: requested.id }] })
+      emit(session, { ...sent[0], source: { kind: 'synthetic' } })
+      emit(child, sent[0])
+      expect(service.decisionsFor('child')[0]?.decision?.deliveryState).toBe('queued')
+      emit(session, sent[0])
+      expect(service.decisionsFor('child')[0]?.decision?.deliveryState).toBe('delivered')
+      await expect(service.answerDecision(requested.id, 'Again')).rejects.toThrow(/already been answered/)
+      expect(followup).toHaveBeenCalledTimes(1)
+      const failed = await service.requestDecision('child', { ...valid, options })
+      followup.mockImplementationOnce(() => { throw new Error('send failed') })
+      expect((await service.answerDecision(failed.id, 'Answer')).decision?.deliveryState).toBe('queued')
+    })
+
     it('requests a pending decision and returns its id at once', async () => {
       const { service } = await open({ top: { cwd } })
       const requested = await service.requestDecision('top', { ...valid, options })
       expect(requested.id).toEqual(expect.any(String))
       expect(service.snapshot().inbox.map(item => item.id)).toEqual([requested.id])
       expect(service.snapshot().inbox[0]).toMatchObject({ sessionId: 'top', level: 'C2', action: 'INTERRUPT', reasonCode: 'DECISION_PENDING', notificationEligible: true })
-      expect(service.snapshot().inbox[0]?.decision).toEqual({ kind: 'pending', ...valid, options, delegationDepth: 0, workingDirectory: cwd })
+      expect(service.snapshot().inbox[0]?.decision).toEqual({ kind: 'pending', ...valid, options, delegationDepth: 0, workingDirectory: cwd, deliveryState: 'queued' })
     })
 
     it('refuses a sixth option or a label past 120 characters, and stores nothing', async () => {

@@ -403,6 +403,11 @@ function isDecisionRecord(value: unknown): value is DecisionRecord {
     && (record.sessionTitle === undefined || typeof record.sessionTitle === 'string')
     && (record.reviewState === undefined || record.reviewState === 'unreviewed' || record.reviewState === 'reviewed' || record.reviewState === 'disputed')
     && (record.options === undefined || isDecisionOptions(record.options))
+    && (record.answer === undefined || (typeof record.answer === 'string' && [...record.answer].length <= DECISION_LIMITS.answer))
+    && (record.answerAt === undefined || (typeof record.answerAt === 'string' && record.answerAt.length <= 64))
+    && (record.deliveryToken === undefined || isSafeOpaqueId(record.deliveryToken))
+    && (record.deliveryState === undefined || record.deliveryState === 'queued' || record.deliveryState === 'delivered')
+    && (record.deliveredAt === undefined || (typeof record.deliveredAt === 'string' && record.deliveredAt.length <= 64))
 }
 
 function isDecisionOptions(value: unknown): value is string[] {

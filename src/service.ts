@@ -212,6 +212,7 @@ export class DeepCanaryService {
   private readonly ctx: ContextLike
   private readonly sessions = new Map<string, LiveSession>()
   private readonly items: InboxItem[] = []
+  private readonly decisionDeliveries = new Set<string>()
   private readonly suppressedReasons = new Set<SuppressibleReasonCode>()
   private readonly dedupe: DedupeLedger
   private readonly budget: InterruptBudget
@@ -632,8 +633,8 @@ export class DeepCanaryService {
 
   /**
    * Put a decision to the user that the agent cannot take alone. It returns at once with
-   * its id, and the agent keeps working. The entry stays pending until the asking session
-   * cancels it; nothing else resolves it, and it never expires. Text or options past a bound
+   * its id, and the agent keeps working. The entry stays pending until answered or cancelled
+   * and never expires. Text or options past a bound
    * are refused, and nothing is stored when any check fails.
    */
   async requestDecision(ownerSessionId: string, input: { sentence: unknown; explanation: unknown; alternatives: unknown; blastRadius: unknown; options: unknown }): Promise<PublicInboxItem> {
@@ -667,7 +668,7 @@ export class DeepCanaryService {
       targetAvailable: true,
       bundleCount: 1,
       reasonCodes: ['DECISION_PENDING'],
-      decision: { kind: 'pending', ...text, options, ...owner },
+      decision: { kind: 'pending', ...text, options, ...owner, deliveryState: 'queued' },
     }
     this.items.unshift(item)
     if (this.items.length > this.config.maxInboxItems) this.items.splice(0, this.items.length, ...retainInboxItems(this.items, this.config.maxInboxItems))
@@ -677,10 +678,68 @@ export class DeepCanaryService {
     return this.toPublic(item)
   }
 
+  /** Commit one answer before attempting delivery to the owning session or its parent. */
+  async answerDecision(id: string, input: unknown): Promise<PublicInboxItem> {
+    await this.ready
+    if (this.disposed) throw new Error('DeepCanary is shutting down; nothing was answered')
+    const item = this.find(id)
+    const decision = item?.decision
+    if (item === undefined || decision?.kind !== 'pending' || item.status === 'cancelled') throw new Error('No pending decision with that id')
+    if (decision.answer !== undefined) throw new Error('This decision has already been answered')
+    const answer = boundedDecisionText('answer', input, true)
+    decision.answer = answer
+    decision.answerAt = nowIso()
+    decision.deliveryToken = randomUUID()
+    decision.deliveryState = 'queued'
+    this.bumpRevision()
+    if (!await this.queueSave()) {
+      delete decision.answer
+      delete decision.answerAt
+      delete decision.deliveryToken
+      this.bumpRevision()
+      throw new Error('The answer could not be saved; nothing was delivered')
+    }
+    await this.flushPendingDelivery(item)
+    return this.toPublic(item)
+  }
+
+  /** Attempt once now; ticket 04b can extend this seam to flush on session start. */
+  private async flushPendingDelivery(item: InboxItem): Promise<void> {
+    const decision = item.decision
+    const target = decision?.parentSessionId ?? item.sessionId
+    if (decision?.answer === undefined || decision.deliveryToken === undefined || decision.deliveryState !== 'queued' || target === undefined || this.decisionDeliveries.has(item.id)) return
+    this.decisionDeliveries.add(item.id)
+    try {
+      const text = `The user answered a decision.\nDecision id: ${item.id}\nQuestion: ${decision.sentence}\nAnswer: ${decision.answer}\nDelivery token: ${decision.deliveryToken}\nTreat the decision id as an idempotency key.`
+      await this.adapter.deliverDecision(target, text)
+    } catch (error) {
+      this.logger.warn?.(`${PLUGIN_NAME}: decision delivery failed; the answer remains queued`, error)
+    } finally {
+      this.decisionDeliveries.delete(item.id)
+    }
+  }
+
+  private observeDecisionDelivery(sessionId: string, value: unknown): void {
+    const message = asRecord(value)
+    if (message.role !== 'user' || asRecord(message.source).kind !== 'user' || !Array.isArray(message.content)) return
+    for (const item of this.items) {
+      const decision = item.decision
+      if (decision?.answer === undefined || decision.deliveryState !== 'queued' || decision.deliveryToken === undefined || (decision.parentSessionId ?? item.sessionId) !== sessionId) continue
+      if (!message.content.some(block => {
+        const part = asRecord(block)
+        return part.type === 'text' && typeof part.text === 'string' && part.text.includes(decision.deliveryToken!)
+      })) continue
+      decision.deliveryState = 'delivered'
+      decision.deliveredAt = nowIso()
+      this.bumpRevision()
+      void this.queueSave()
+    }
+  }
+
   /** Withdraw a pending decision. Only the session that asked may cancel it, and only while it is pending. */
   cancelDecision(ownerSessionId: string, id: string): PublicInboxItem {
     const item = this.find(id)
-    if (item?.decision?.kind !== 'pending' || item.sessionId !== ownerSessionId || item.status === 'cancelled') {
+    if (item?.decision?.kind !== 'pending' || item.sessionId !== ownerSessionId || item.status === 'cancelled' || item.decision.answer !== undefined) {
       throw new Error('No pending decision with that id belongs to this session; nothing was cancelled')
     }
     item.status = 'cancelled'
@@ -1502,6 +1561,7 @@ export class DeepCanaryService {
     const event = asRecord(eventValue)
     const id = idOf(sessionRecord)
     if (!id || typeof event.type !== 'string') return
+    if (event.type === 'user/message') this.observeDecisionDelivery(id, event.data)
     if (event.ignorable === true) {
       // Projection changes still matter; ignorable events must not count as progress.
       this.queueQuestionSync(id, authoritativeSnapshot, Date.now())
@@ -2046,10 +2106,15 @@ export class DeepCanaryService {
       ...(item.taskState === undefined ? {} : { taskState: item.taskState }),
       ...(item.questionState === undefined ? {} : { questionState: item.questionState }),
       ...(item.feedback ? { feedback: { useful: item.feedback.useful, ...(item.feedback.value === undefined ? {} : { value: item.feedback.value }), at: item.feedback.at } } : {}),
-      ...(item.decision === undefined ? {} : { decision: { ...item.decision } }),
+      ...(item.decision === undefined ? {} : { decision: this.publicDecision(item.decision) }),
       bundleCount: item.bundleCount,
       reasonCodes: [...item.reasonCodes],
     }
+  }
+
+  private publicDecision(decision: DecisionRecord): DecisionRecord {
+    const { deliveryToken: _token, ...visible } = decision
+    return visible
   }
 
   private isPending(item: InboxItem, now: number): boolean {
@@ -2070,6 +2135,7 @@ export class DeepCanaryService {
 
   private notificationEligible(item: InboxItem): boolean {
     const now = Date.now()
+    if (item.decision?.kind === 'pending' && item.decision.answer !== undefined) return false
     if (!this.isPending(item, now) || !this.reminderAuthorityReady(item)
       || (item.action !== 'INTERRUPT' && item.action !== 'ESCALATE')
       || (item.mutedUntil !== undefined && Date.parse(item.mutedUntil) > now)

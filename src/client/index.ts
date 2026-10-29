@@ -58,7 +58,7 @@ type ClientItem = {
   taskState?: 'running' | 'waiting-human' | 'completed' | 'failed' | 'aborted' | 'disposed' | 'unknown'
   feedback?: { useful: boolean; value?: 'useful' | 'not-relevant' | 'wrong-level' | 'already-resolved'; at: string }
   /** Decision content; present only on decision items. Options are absent on made decisions. */
-  decision?: { kind: 'pending' | 'made'; sentence: string; explanation: string; options?: string[]; sessionTitle?: string }
+  decision?: { kind: 'pending' | 'made'; sentence: string; explanation: string; options?: string[]; sessionTitle?: string; answer?: string; deliveryState?: 'queued' | 'delivered' }
   bundleCount: number
 }
 
@@ -110,6 +110,7 @@ type ActionNotice = {
   useful?: boolean
   value?: string
   tone: 'success' | 'error'
+  text?: string
 }
 
 type ClientContext = SessionNavigationContext & {
@@ -152,6 +153,7 @@ type Controller = {
   setTrigger: (element: HTMLButtonElement | null) => void
   setSize: (width: number, height: number) => void
   action: (id: string, payload: Record<string, unknown>) => Promise<void>
+  answerDecision: (id: string, answer: string) => Promise<void>
   canNotifyItem: (item: ClientItem) => boolean
   claimDelivery: (id: string, expiresAt: string, generation: number) => Promise<'granted' | 'already-claimed' | 'already-complete' | 'exhausted' | 'unavailable'>
   recordDelivery: (id: string, payload: {
@@ -313,6 +315,12 @@ const zh = {
   'item.decisionOptions': '可选项：{options}',
   'item.decisionExplanation': '说明',
   'item.decisionSession': '所属会话：{session}',
+  'item.decisionAnswer': '你的回答',
+  'item.decisionSubmit': '提交回答',
+  'item.decisionQueued': '等待送达',
+  'item.decisionDelivered': '已送达',
+  'item.decisionAnswerFailed': '回答未保存，请检查连接后重试。',
+  'item.decisionAnswerLong': '回答不能超过 8000 个字符。',
   'item.reason.unknown': '检测到需要关注的运行时事件。',
   'item.suggestion.HUMAN_APPROVAL_REQUIRED': '在 DSH 中查看待审批请求并决定是否允许。',
   'item.suggestion.HUMAN_QUESTION_PENDING': '准备好后，在 DSH 中回答待处理问题。',
@@ -543,6 +551,12 @@ const en = {
   'item.decisionOptions': 'Options: {options}',
   'item.decisionExplanation': 'Explanation',
   'item.decisionSession': 'Session: {session}',
+  'item.decisionAnswer': 'Your answer',
+  'item.decisionSubmit': 'Submit answer',
+  'item.decisionQueued': 'Queued',
+  'item.decisionDelivered': 'Delivered',
+  'item.decisionAnswerFailed': 'The answer was not saved. Check the connection and try again.',
+  'item.decisionAnswerLong': 'The answer cannot exceed 8000 characters.',
   'item.reason.unknown': 'A runtime event needs your attention.',
   'item.suggestion.HUMAN_APPROVAL_REQUIRED': 'Review the pending request in DSH and decide whether to allow it.',
   'item.suggestion.HUMAN_QUESTION_PENDING': 'Answer the pending question in DSH when you are ready.',
@@ -988,6 +1002,31 @@ function createController(ctx: ClientContext): Controller {
         publish({ pending: finished })
       }
     },
+    answerDecision: async (id, answer) => {
+      if (state.pending.has(id)) return
+      if ([...answer].length > 8000) { showNotice({ id, kind: 'answer-long', tone: 'error' }); return }
+      const nextPending = new Set(state.pending)
+      nextPending.add(id)
+      publish({ pending: nextPending })
+      try {
+        const response = await request('/api/dsh-deepcanary/decision/answer', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, answer }),
+        })
+        if (!response) throw new Error('')
+        if (!response.ok) {
+          const result = await response.json() as { error?: unknown }
+          showNotice({ id, kind: 'answer-failed', tone: 'error', ...(typeof result.error === 'string' ? { text: result.error } : {}) })
+          return
+        }
+        await controller.refresh()
+      } catch {
+        showNotice({ id, kind: 'answer-failed', tone: 'error' })
+      } finally {
+        const finished = new Set(state.pending)
+        finished.delete(id)
+        publish({ pending: finished })
+      }
+    },
     canNotifyItem: item => !disposed && state.snapshot?.inbox.some(current => current.id === item.id
       && notificationGeneration(current) === notificationGeneration(item) && current.notificationEligible !== false) === true,
     claimDelivery: async (id, expiresAt, generation) => {
@@ -1244,6 +1283,7 @@ function notificationBody(item: ClientItem, t: Translate): string {
 }
 
 function noticeText(notice: ActionNotice, t: Translate): string {
+  if (notice.text !== undefined) return notice.text
   if (notice.kind === 'feedback-recorded') {
     if (notice.value === 'wrong-level') return translate(t, 'item.feedbackWrongLevel')
     if (notice.value === 'already-resolved') return translate(t, 'item.feedbackAlreadyResolved')
@@ -1259,6 +1299,8 @@ function noticeText(notice: ActionNotice, t: Translate): string {
     'suppression-restored': 'item.notice.suppressionRestored',
     'jump-unavailable': 'item.notice.jumpUnavailable',
     'action-failed': 'item.notice.actionFailed',
+    'answer-failed': 'item.decisionAnswerFailed',
+    'answer-long': 'item.decisionAnswerLong',
   }
   return translate(t, keys[notice.kind] ?? 'item.notice.actionFailed')
 }
@@ -1877,6 +1919,22 @@ function itemCard(item: ClientItem, state: ControllerState, t: Translate, contro
     if (decision.options !== undefined && decision.options.length > 0) {
       children.push(createElement('p', { className: 'dsc-decision-options', key: 'decision-options' },
         translate(t, 'item.decisionOptions', { options: decision.options.join(' · ') })))
+    }
+    if (decision.kind === 'pending') {
+      children.push(createElement('p', { className: 'dsc-card-suggestion', key: 'delivery-state' },
+        translate(t, decision.deliveryState === 'delivered' ? 'item.decisionDelivered' : 'item.decisionQueued')))
+      if (decision.answer === undefined) children.push(createElement('form', {
+        key: 'decision-answer',
+        onSubmit: (event: FormEvent<HTMLFormElement>) => {
+          event.preventDefault()
+          const answer = new FormData(event.currentTarget).get('answer')
+          if (typeof answer === 'string') void controller.answerDecision(item.id, answer)
+        },
+      },
+      createElement('label', null, translate(t, 'item.decisionAnswer'),
+        createElement('textarea', { name: 'answer', required: true, disabled: busy, rows: 3,
+          style: { display: 'block', width: '100%', boxSizing: 'border-box', font: 'inherit' } })),
+      createElement('button', { type: 'submit', className: 'dsc-card-action', disabled: busy }, translate(t, 'item.decisionSubmit'))))
     }
     children.push(createElement('details', { className: 'dsc-decision-explanation', key: 'decision-explanation' },
       createElement('summary', null, translate(t, 'item.decisionExplanation')),

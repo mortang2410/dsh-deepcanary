@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -9,6 +10,7 @@ import { loadRuntime } from './runtime-checkout.mjs'
 const runtime = await loadRuntime(process.env.DSH_RUNTIME)
 const { Context } = await runtime.importPackage('@deepseek-ai/cordis')
 const { SessionStore } = await runtime.importPackage('@deepseek-ai/dsh-session')
+const { AgentRegistry } = await runtime.importPackage('@deepseek-ai/dsh-agent')
 const { CredentialProvider } = await runtime.importPackage('@deepseek-ai/dsh-credentials')
 const { default: WebServer } = await runtime.importPackage('@deepseek-ai/dsh-host-webserver')
 const connectionPlugin = await runtime.importPackage('@deepseek-ai/dsh-client-connection')
@@ -51,6 +53,8 @@ function openSession(id, meta) {
 
 try {
   fibers.push(await ctx.plugin(SessionStore))
+  fibers.push(await ctx.plugin(AgentRegistry))
+  ctx.provide('profileContext', { name: 'contract', dir: directory, home: directory })
   const parent = openSession('controlled-decision-owner', { cwd: directory })
   const child = openSession('controlled-decision-subagent', {
     cwd: directory, parentSession: parent.id, origin: 'subagent', delegationDepth: 1,
@@ -85,7 +89,9 @@ try {
 
   const before = service.inbox(20)
   await service.dispose()
-  service = new DeepCanaryService(ctx, { stateDir: directory })
+  fibers.push(await ctx.plugin({ name: 'decision-contract-scoped-service', inject: ['sessions', 'profileContext'], apply(scopedCtx) {
+    service = new DeepCanaryService(scopedCtx, { stateDir: directory })
+  } }))
   await service.ready
   bindTools()
   assert.deepEqual(service.inbox(20), before)
@@ -124,6 +130,62 @@ try {
   assert.equal(cancelled.status, 'cancelled')
   assert.equal((await readInbox()).some(item => item.id === requested.id), false)
   checks.pendingCancelLeavesView = true
+
+  service.start()
+  await service.adapter.start()
+  const sent = []
+  const detachAgent = ctx.agents.enter({ id: parent.id, session: parent, ctx, followup(message) { sent.push(message) } })
+  detachers.push(detachAgent)
+  const answerRequest = async (id, answer) => fetch(`${base}/api/dsh-deepcanary/decision/answer`, {
+    method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ id, answer }),
+  })
+  const unauthenticated = await fetch(`${base}/api/dsh-deepcanary/decision/answer`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: 'none', answer: 'none' }),
+  })
+  assert.equal(unauthenticated.status, 401)
+  checks.answerRouteRequiresAuthentication = true
+  const pending = await tool('deepcanary_request_decision').execute(
+    { ...valid, options: ['Keep the store'] }, { agent: { id: child.id } },
+  )
+  assert.equal((await readInbox()).find(item => item.id === pending.id).decision.deliveryState, 'queued')
+  checks.queuedBeforeAnswer = true
+  const tooLong = await answerRequest(pending.id, 'x'.repeat(8001))
+  assert.equal(tooLong.status, 400)
+  assert.match((await tooLong.json()).error, /8000/)
+  assert.equal(sent.length, 0)
+  checks.overlongAnswerRefused = true
+  const response = await answerRequest(pending.id, 'Keep the store')
+  assert.equal(response.status, 200)
+  const answered = (await response.json()).item
+  assert.equal(answered.decision.deliveryState, 'queued')
+  assert.equal(answered.decision.deliveryToken, undefined)
+  assert.equal(sent.length, 1)
+  assert.equal(sent[0].role, 'user')
+  assert.equal(sent[0].source.kind, 'user')
+  const deliveredText = sent[0].content.find(block => block.type === 'text').text
+  assert.match(deliveredText, /Delivery token: [0-9a-f-]{36}/)
+  assert.match(deliveredText, /idempotency key/)
+  assert.ok(deliveredText.includes(pending.id) && deliveredText.includes(valid.sentence) && deliveredText.includes('Keep the store'))
+  checks.tokenMessageReachedParentCaptureAgent = true
+  parent.append('user/message', { id: randomUUID(), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: pending.id }] }, { surfaceOp: 'append' })
+  assert.equal((await readInbox()).find(item => item.id === pending.id).decision.deliveryState, 'queued')
+  checks.idAloneDoesNotMarkDelivered = true
+  parent.append('user/message', sent[0], { surfaceOp: 'append' })
+  assert.equal((await readInbox()).find(item => item.id === pending.id).decision.deliveryState, 'delivered')
+  checks.observedTokenMarksDelivered = true
+  const repeated = await answerRequest(pending.id, 'Different answer')
+  assert.equal(repeated.status, 400)
+  assert.match((await repeated.json()).error, /already been answered/)
+  assert.equal(sent.length, 1)
+  checks.secondAnswerRefused = true
+  detachers.pop()()
+  const offline = await tool('deepcanary_request_decision').execute(
+    { ...valid, options: [] }, { agent: { id: parent.id } },
+  )
+  assert.equal((await answerRequest(offline.id, 'Queued answer')).status, 200)
+  assert.equal((await readInbox()).find(item => item.id === offline.id).decision.deliveryState, 'queued')
+  assert.equal(sent.length, 1)
+  checks.nonLiveTargetStaysQueued = true
 
   console.log(JSON.stringify({ passed: true, runtimeVersion: runtime.version, checks }, null, 2))
 } finally {

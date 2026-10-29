@@ -7,6 +7,7 @@ export declare const DECISION_LIMITS: {
     readonly sessionTitle: 200;
     readonly workingDirectory: 500;
     readonly optionLabel: 120;
+    readonly answer: 8000;
 };
 /** A pending decision offers at most this many options. */
 export declare const MAX_DECISION_OPTIONS = 5;

@@ -20,10 +20,10 @@ function etagFor(revision: number): string { return `W/"dc-${revision}"` }
 class InvalidBody extends Error {
   constructor(readonly status: number) { super('invalid request body') }
 }
-async function body(request: Request): Promise<Record<string, unknown>> {
+async function body(request: Request, maxBytes = MAX_BODY_BYTES): Promise<Record<string, unknown>> {
   if (request.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json') throw new InvalidBody(415)
   const declaredLength = Number(request.headers.get('content-length') ?? 0)
-  if (declaredLength > MAX_BODY_BYTES) throw new InvalidBody(413)
+  if (declaredLength > maxBytes) throw new InvalidBody(413)
   const reader = request.body?.getReader()
   if (!reader) throw new InvalidBody(400)
   const chunks: Uint8Array[] = []
@@ -34,7 +34,7 @@ async function body(request: Request): Promise<Record<string, unknown>> {
       if (next.done) break
       size += next.value.byteLength
       // Releasing the reader stops consumption; the public bridge closes an unread request after its response.
-      if (size > MAX_BODY_BYTES) throw new InvalidBody(413)
+      if (size > maxBytes) throw new InvalidBody(413)
       chunks.push(next.value)
     }
   } finally { reader.releaseLock() }
@@ -93,6 +93,16 @@ export function installWebRoutes(ctx: unknown, service: DeepCanaryService): void
       const receipt = await service.performAction(typeof payload.requestId === 'string' ? payload.requestId : '',
         typeof payload.id === 'string' ? payload.id : '', typeof payload.action === 'string' ? payload.action : '', payload)
       return json(receipt.status, receipt.body)
+    })
+    register('decision/answer', ['POST'], async request => {
+      const payload = await body(request, 128_000)
+      if (Object.keys(payload).some(key => key !== 'id' && key !== 'answer') || typeof payload.id !== 'string' || typeof payload.answer !== 'string') throw new InvalidBody(400)
+      try {
+        const item = await service.answerDecision(payload.id, payload.answer)
+        return json(200, { item }, { etag: etagFor(service.status().revision) })
+      } catch (error) {
+        return json(400, { error: error instanceof Error ? error.message : 'Answer could not be saved', schemaVersion: ATTENTION_PROTOCOL_VERSION })
+      }
     })
     register('explain', ['GET'], async request => {
       const result = service.explain(new URL(request.url).searchParams.get('id') ?? '')

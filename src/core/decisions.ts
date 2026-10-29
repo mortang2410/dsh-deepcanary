@@ -7,6 +7,7 @@ export const DECISION_LIMITS = {
   sessionTitle: 200,
   workingDirectory: 500,
   optionLabel: 120,
+  answer: 8000,
 } as const
 
 /** A pending decision offers at most this many options. */
@@ -22,6 +23,7 @@ const labels: Record<DecisionTextField, string> = {
   sessionTitle: 'session title',
   workingDirectory: 'working directory',
   optionLabel: 'option label',
+  answer: 'answer',
 }
 
 /** Fields rendered on one line; their control characters include the line breaks. */
