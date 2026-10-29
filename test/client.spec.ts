@@ -203,3 +203,76 @@ describe('DeepCanary DSH client surface', () => {
     expect(source).toContain('if (snapshot !== undefined && hasDecisions) body.push')
   })
 })
+
+describe('decision card rendering', () => {
+  /** Every text node a rendered card would show, in document order. */
+  function cardText(node: unknown, out: string[] = []): string[] {
+    if (typeof node === 'string' || typeof node === 'number') {
+      out.push(String(node))
+      return out
+    }
+    if (Array.isArray(node)) {
+      for (const child of node) cardText(child, out)
+      return out
+    }
+    if (node !== null && typeof node === 'object' && 'props' in node) {
+      const children = (node as { props?: { children?: unknown } }).props?.children
+      if (children !== undefined) cardText(children, out)
+    }
+    return out
+  }
+
+  // A stub that never returns the bare key, so the card cannot fall back to its built-in catalogue
+  // and every label the card asks for shows up with its parameters in the collected text.
+  const translate = (key: string, params?: Record<string, unknown>): string =>
+    params === undefined ? `T:${key}` : `T:${key} ${Object.values(params).join(' ')}`
+
+  async function render(item: Record<string, unknown>): Promise<string> {
+    const { itemCard } = await import('../src/client/index.js')
+    const previous = Reflect.get(globalThis, 'document')
+    Reflect.set(globalThis, 'document', { documentElement: { lang: 'en' } })
+    try {
+      const context = {
+        state: { pending: new Set<string>() },
+        t: translate,
+        controller: { hasHistoricalSession: () => false },
+        sessionListSnapshot: undefined,
+        selectedId: undefined,
+      }
+      const tree = itemCard(
+        { evidence: [], targetAvailable: true, bundleCount: 1, ...item } as unknown as Parameters<typeof itemCard>[0],
+        context as unknown as Parameters<typeof itemCard>[1],
+      )
+      return cardText(tree).join('\n')
+    } finally {
+      if (previous === undefined) Reflect.deleteProperty(globalThis, 'document')
+      else Reflect.set(globalThis, 'document', previous)
+    }
+  }
+
+  it('shows the stored answer on a pending decision and hides the answer form', async () => {
+    const text = await render({
+      id: 'decision-1',
+      level: 'C2',
+      status: 'open',
+      occurredAt: '2026-01-01T00:00:00.000Z',
+      decision: { kind: 'pending', sentence: 'Which store?', explanation: 'Two stores compete.', answer: 'Keep the store', deliveryState: 'queued' },
+    })
+
+    expect(text).toContain('T:item.decisionAnswerGiven Keep the store')
+    expect(text).not.toContain('T:item.decisionSubmit')
+  })
+
+  it('offers the answer form while a pending decision has no answer', async () => {
+    const text = await render({
+      id: 'decision-2',
+      level: 'C2',
+      status: 'open',
+      occurredAt: '2026-01-01T00:00:00.000Z',
+      decision: { kind: 'pending', sentence: 'Which store?', explanation: 'Two stores compete.' },
+    })
+
+    expect(text).toContain('T:item.decisionSubmit')
+    expect(text).not.toContain('T:item.decisionAnswerGiven')
+  })
+})

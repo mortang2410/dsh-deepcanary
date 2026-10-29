@@ -1991,7 +1991,7 @@ type InboxRenderContext = {
   selectedId: string | undefined
 }
 
-function itemCard(item: ClientItem, context: InboxRenderContext): ReactNode {
+export function itemCard(item: ClientItem, context: InboxRenderContext): ReactNode {
   const { state, t, controller, sessionListSnapshot, selectedId } = context
   const busy = state.pending.has(item.id)
   const canReturn = item.sessionId !== undefined
