@@ -87,7 +87,6 @@ export declare class DeepCanaryService {
         explanation: unknown;
         alternatives: unknown;
         blastRadius: unknown;
-        sessionTitle?: unknown;
     }): Promise<PublicInboxItem>;
     /**
      * Put a decision to the user that the agent cannot take alone. It returns at once with

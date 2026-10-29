@@ -4,7 +4,6 @@ export declare const DECISION_LIMITS: {
     readonly explanation: 4000;
     readonly alternatives: 4000;
     readonly blastRadius: 2000;
-    readonly sessionTitle: 200;
     readonly workingDirectory: 500;
     readonly optionLabel: 120;
     readonly answer: 8000;

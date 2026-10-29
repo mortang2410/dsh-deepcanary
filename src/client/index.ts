@@ -60,7 +60,7 @@ type ClientItem = {
   taskState?: 'running' | 'waiting-human' | 'completed' | 'failed' | 'aborted' | 'disposed' | 'unknown'
   feedback?: { useful: boolean; value?: 'useful' | 'not-relevant' | 'wrong-level' | 'already-resolved'; at: string }
   /** Decision content; present only on decision items. Options are absent on made decisions. */
-  decision?: { kind: 'pending' | 'made'; sentence: string; explanation: string; options?: string[]; parentSessionId?: string; delegationDepth?: number; workingDirectory?: string; sessionTitle?: string; answer?: string; reviewState?: 'unreviewed' | 'reviewed' | 'disputed'; disputeText?: string; deliveryState?: 'queued' | 'delivered'; sessionUnavailable?: boolean }
+  decision?: { kind: 'pending' | 'made'; sentence: string; explanation: string; options?: string[]; parentSessionId?: string; delegationDepth?: number; workingDirectory?: string; answer?: string; reviewState?: 'unreviewed' | 'reviewed' | 'disputed'; disputeText?: string; deliveryState?: 'queued' | 'delivered'; sessionUnavailable?: boolean }
   bundleCount: number
 }
 

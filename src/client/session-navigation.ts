@@ -59,7 +59,7 @@ export function workingDirectoryBasename(directory: string | undefined): string 
 
 /** Use the current Host title, otherwise the working-directory basename as a live placeholder. */
 export function decisionSessionLabel(
-  item: { sessionId?: string; decision?: { workingDirectory?: string; sessionTitle?: string } },
+  item: { sessionId?: string; decision?: { workingDirectory?: string } },
   session?: SessionSummary,
 ): string | undefined {
   const title = session?.title?.trim()

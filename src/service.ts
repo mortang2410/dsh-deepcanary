@@ -601,11 +601,10 @@ export class DeepCanaryService {
    * dedupe ledger because each decision carries its own unique id. Text past a
    * bound is refused, and nothing is stored when any check fails.
    */
-  async recordMadeDecision(ownerSessionId: string, input: { sentence: unknown; explanation: unknown; alternatives: unknown; blastRadius: unknown; sessionTitle?: unknown }): Promise<PublicInboxItem> {
+  async recordMadeDecision(ownerSessionId: string, input: { sentence: unknown; explanation: unknown; alternatives: unknown; blastRadius: unknown }): Promise<PublicInboxItem> {
     await this.ready
     if (this.disposed) throw new Error('DeepCanary is shutting down; nothing was recorded')
     const text = decisionText(input)
-    const sessionTitle = boundedDecisionText('sessionTitle', input.sessionTitle, false)
     const owner = this.decisionOwner(ownerSessionId)
     const id = randomUUID()
     const item: InboxItem = {
@@ -631,7 +630,6 @@ export class DeepCanaryService {
         kind: 'made',
         ...text,
         ...owner,
-        ...(sessionTitle === undefined ? {} : { sessionTitle }),
         reviewState: 'unreviewed',
       },
     }

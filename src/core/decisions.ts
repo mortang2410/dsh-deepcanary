@@ -4,7 +4,6 @@ export const DECISION_LIMITS = {
   explanation: 4000,
   alternatives: 4000,
   blastRadius: 2000,
-  sessionTitle: 200,
   workingDirectory: 500,
   optionLabel: 120,
   answer: 8000,
@@ -21,7 +20,6 @@ const labels: Record<DecisionTextField, string> = {
   explanation: 'explanation',
   alternatives: 'alternatives',
   blastRadius: 'blast radius',
-  sessionTitle: 'session title',
   workingDirectory: 'working directory',
   optionLabel: 'option label',
   answer: 'answer',
@@ -29,7 +27,7 @@ const labels: Record<DecisionTextField, string> = {
 }
 
 /** Fields rendered on one line; their control characters include the line breaks. */
-const singleLineFields = new Set<DecisionTextField>(['sentence', 'sessionTitle', 'workingDirectory', 'optionLabel'])
+const singleLineFields = new Set<DecisionTextField>(['sentence', 'workingDirectory', 'optionLabel'])
 const singleLineControl = /[\u0000-\u001f\u007f]/
 const multiLineControl = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/
 

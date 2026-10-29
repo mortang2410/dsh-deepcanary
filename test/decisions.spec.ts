@@ -94,7 +94,7 @@ describe('decision session grouping', () => {
 
   it('replaces the working-directory placeholder when the session title arrives later', () => {
     const item = groupingItem('entry', 'root', '2026-01-01T00:00:00.000Z', {
-      sessionTitle: 'stale tool title', workingDirectory: '/work/project',
+      workingDirectory: '/work/project',
     })
     const before = groupDecisionItems([item], { byId: { root: { id: 'root', cwd: '/work/project' } } })
     const after = groupDecisionItems([item], { byId: { root: { id: 'root', cwd: '/work/project', title: 'Session title event' } } })
@@ -252,7 +252,6 @@ describe('decisions', () => {
     ['explanation', 4000],
     ['alternatives', 4000],
     ['blastRadius', 2000],
-    ['sessionTitle', 200],
   ] as const)('accepts %s at its limit and refuses one character past it, storing nothing', async (field, limit) => {
     const { service } = await open({ top: { cwd } })
     const accepted = await service.recordMadeDecision('top', { ...valid, [field]: 'a'.repeat(limit) })

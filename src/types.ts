@@ -145,8 +145,6 @@ export interface DecisionRecord {
   delegationDepth: number
   /** Working directory of the owning session as the host recorded it, at most 500 characters. */
   workingDirectory?: string
-  /** Session title, at most 200 characters; absent until the host supplies one. */
-  sessionTitle?: string
   /** Set for made decisions. */
   reviewState?: DecisionReviewState
   /** Options a pending decision offers: at most five labels, each at most 120 characters. Absent on made decisions. */

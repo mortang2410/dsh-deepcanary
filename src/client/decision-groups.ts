@@ -14,7 +14,6 @@ export interface DecisionGroupingEntry {
     parentSessionId?: string
     delegationDepth?: number
     workingDirectory?: string
-    sessionTitle?: string
     sessionUnavailable?: boolean
   }
 }

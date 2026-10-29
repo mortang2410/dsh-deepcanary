@@ -75,7 +75,7 @@ describe('decision session label', () => {
   })
 
   it('uses the working-directory basename until the Host title arrives', () => {
-    const item = { sessionId: 'session-a', decision: { workingDirectory: '/work/project', sessionTitle: 'stale tool title' } }
+    const item = { sessionId: 'session-a', decision: { workingDirectory: '/work/project' } }
     expect(decisionSessionLabel(item, { id: 'session-a', cwd: '/work/project' })).toBe('project')
     expect(decisionSessionLabel(item, { id: 'session-a', cwd: '/work/project', title: 'Session title event' })).toBe('Session title event')
   })
