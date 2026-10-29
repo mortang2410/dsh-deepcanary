@@ -1,4 +1,6 @@
+import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
+import { boundedDecisionText, madeDecisionText } from './core/decisions.js'
 import { DedupeLedger, InterruptBudget } from './core/dedupe.js'
 import { DeliveryLedger } from './core/delivery.js'
 import type { DeliveryClaimOutcome } from './core/delivery.js'
@@ -579,6 +581,66 @@ export class DeepCanaryService {
     return this.items.slice(0, safeLimit).map(item => this.toPublic(item))
   }
 
+  /**
+   * Record a decision the owning session already took. It enters the inbox as a
+   * made decision at C1, so it never notifies, and it bypasses the attention
+   * dedupe ledger because each decision carries its own unique id. Text past a
+   * bound is refused, and nothing is stored when any check fails.
+   */
+  async recordMadeDecision(ownerSessionId: string, input: { sentence: unknown; explanation: unknown; alternatives: unknown; blastRadius: unknown; sessionTitle?: unknown }): Promise<PublicInboxItem> {
+    await this.ready
+    if (this.disposed) throw new Error('DeepCanary is shutting down; nothing was recorded')
+    const text = madeDecisionText(input)
+    const sessionTitle = boundedDecisionText('sessionTitle', input.sessionTitle, false)
+    const lineage = this.adapter.sessionLineage(ownerSessionId)
+    if (lineage === undefined) throw new Error('The calling session is not known to the host; nothing was recorded')
+    const workingDirectory = boundedDecisionText('workingDirectory', lineage.workingDirectory, false)
+    const id = randomUUID()
+    const item: InboxItem = {
+      schemaVersion: PROTOCOL_VERSION,
+      eventId: id,
+      id,
+      level: 'C1',
+      action: 'INBOX',
+      confidence: 1,
+      reasonCode: 'DECISION_MADE',
+      messageKey: 'item.reason.DECISION_MADE',
+      policyVersion: ATTENTION_POLICY_VERSION,
+      why: text.sentence,
+      evidence: [],
+      sessionId: ownerSessionId,
+      sessionRef: hashMetadata(ownerSessionId),
+      occurredAt: nowIso(),
+      status: 'open',
+      targetAvailable: true,
+      bundleCount: 1,
+      reasonCodes: ['DECISION_MADE'],
+      decision: {
+        kind: 'made',
+        ...text,
+        ...(lineage.parentSessionId === undefined ? {} : { parentSessionId: lineage.parentSessionId }),
+        delegationDepth: lineage.delegationDepth,
+        ...(workingDirectory === undefined ? {} : { workingDirectory }),
+        ...(sessionTitle === undefined ? {} : { sessionTitle }),
+        reviewState: 'unreviewed',
+      },
+    }
+    this.items.unshift(item)
+    if (this.items.length > this.config.maxInboxItems) this.items.splice(0, this.items.length, ...retainInboxItems(this.items, this.config.maxInboxItems))
+    if (!this.items.includes(item)) throw new Error('The inbox is full of items that outrank this decision; nothing was recorded')
+    this.bumpRevision()
+    this.queueSave()
+    this.syncSupervisor()
+    return this.toPublic(item)
+  }
+
+  /** The owning session's own decisions, newest first. Read-only. */
+  decisionsFor(ownerSessionId: string): PublicInboxItem[] {
+    return this.items
+      .filter(item => item.decision !== undefined && item.sessionId === ownerSessionId)
+      .map(item => this.toPublic(item))
+  }
+
   /** Record one redacted decision outcome for a local, controlled, or replay trial. */
   async recordOutcome(id: string, input: unknown): Promise<OutcomeReceipt | undefined> {
     await this.ready
@@ -656,7 +718,8 @@ export class DeepCanaryService {
 
   acknowledge(id: string): boolean {
     const item = this.find(id)
-    if (!item || item.status === 'acknowledged' || item.status === 'muted' || item.status === 'recovered' || item.status === 'expired') return false
+    // A decision is never acknowledged: a pending one is still owed an answer, and a made one is reviewed or disputed.
+    if (!item || item.decision !== undefined || item.status === 'acknowledged' || item.status === 'muted' || item.status === 'recovered' || item.status === 'expired') return false
     item.status = 'acknowledged'
     delete item.reminderPending
     item.acknowledgedAt = nowIso()
@@ -1912,6 +1975,7 @@ export class DeepCanaryService {
       ...(item.taskState === undefined ? {} : { taskState: item.taskState }),
       ...(item.questionState === undefined ? {} : { questionState: item.questionState }),
       ...(item.feedback ? { feedback: { useful: item.feedback.useful, ...(item.feedback.value === undefined ? {} : { value: item.feedback.value }), at: item.feedback.at } } : {}),
+      ...(item.decision === undefined ? {} : { decision: { ...item.decision } }),
       bundleCount: item.bundleCount,
       reasonCodes: [...item.reasonCodes],
     }
@@ -2021,7 +2085,8 @@ export class DeepCanaryService {
         item.targetAvailable = false
         changed = true
       }
-      if (!isActiveInboxStatus(item.status)) continue
+      // A decision keeps its content and gains only the unavailable marker; it is never expired here.
+      if (item.decision !== undefined || !isActiveInboxStatus(item.status)) continue
       // A terminal task fact is a retained completion/failure summary, not a
       // live-session lease. Disposal or a missing native handle must not make
       // that user-visible result disappear during reconciliation.

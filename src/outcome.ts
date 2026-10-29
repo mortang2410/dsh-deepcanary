@@ -194,6 +194,9 @@ export function eventClassForReason(reasonCode: ReasonCode): OutcomeEventClass {
     case 'TASK_ABORTED':
     case 'COMPLETION_SUSPICIOUS':
       return 'completion'
+    case 'DECISION_PENDING':
+    case 'DECISION_MADE':
+      throw new TypeError('a decision item has no outcome class; outcomes record attention items only')
   }
 }
 

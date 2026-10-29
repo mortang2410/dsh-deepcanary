@@ -102,6 +102,8 @@ function eventSubtypeForReason(reasonCode: ReasonCode): string {
     TASK_ABORTED: 'aborted',
     COMPLETION_SUSPICIOUS: 'suspicious',
     HOST_STALL_RECOVERED: 'recovered',
+    DECISION_PENDING: 'pending-decision',
+    DECISION_MADE: 'made-decision',
   }[reasonCode]
 }
 

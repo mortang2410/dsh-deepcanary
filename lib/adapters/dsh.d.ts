@@ -62,6 +62,14 @@ interface DshAdapterOptions {
 }
 interface SessionStoreLike {
     list?: () => readonly unknown[] | Promise<readonly unknown[]>;
+    get?: (id: string) => unknown;
+}
+/** Host lineage of one session, read from its creation header. */
+export interface SessionLineage {
+    parentSessionId?: string;
+    /** 0 for a top-level session; the host omits the header field for it. */
+    delegationDepth: number;
+    workingDirectory?: string;
 }
 /** Context-backed adapter used by the plugin host; all DSH event wiring lives here. */
 export declare class ContextDshAdapter implements DshAdapter {
@@ -86,6 +94,8 @@ export declare class ContextDshAdapter implements DshAdapter {
     getReconciliationStatus(): ReconciliationStatus;
     subscribe(listener: (event: DeepCanaryEvent) => void): Disposable;
     getSessionSnapshot(sessionId: string): Promise<SessionSnapshot | null>;
+    /** Lineage the host recorded for a live session; undefined when the host does not know it. */
+    sessionLineage(sessionId: string): SessionLineage | undefined;
     getRuntimeHealth(): Promise<RuntimeHealth>;
     private publish;
     private publishLive;

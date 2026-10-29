@@ -10,7 +10,7 @@ import { DeliveryLedger } from './core/delivery.js'
 import type { PersistedDeliveryEntry } from './core/delivery.js'
 import type { PersistedDedupeEntry } from './core/dedupe.js'
 import { MAX_NOTIFICATION_GENERATION } from './core/reminders.js'
-import type { AttentionAction, AttentionLevel, EvidenceAuthority, EvidenceType, FeedbackValue, InboxItem, InboxStatus, MessageParams, PolicyDecisionTrace, ReasonCode, SuppressibleReasonCode, TaskState } from './types.js'
+import type { AttentionAction, AttentionLevel, DecisionRecord, EvidenceAuthority, EvidenceType, FeedbackValue, InboxItem, InboxStatus, MessageParams, PolicyDecisionTrace, ReasonCode, SuppressibleReasonCode, TaskState } from './types.js'
 
 interface PersistedEvidence {
   type: EvidenceType
@@ -55,6 +55,7 @@ interface PersistedItem {
   taskState?: TaskState
   questionState?: 'open' | 'continued'
   feedback?: { useful: boolean; value?: FeedbackValue; note?: string; at: string }
+  decision?: DecisionRecord
   bundleKey?: string
   bundleCount?: number
   reasonCodes?: ReasonCode[]
@@ -144,6 +145,8 @@ function toPersisted(item: InboxItem): PersistedItem {
     ...(item.taskState === undefined ? {} : { taskState: item.taskState }),
     ...(item.questionState === undefined ? {} : { questionState: item.questionState }),
     ...(item.feedback ? { feedback: { ...item.feedback, ...(item.feedback.note ? { note: item.feedback.note.slice(0, 200) } : {}) } } : {}),
+    // Decision text is refused at write time past its own bounds, so it is stored whole here.
+    ...(item.decision === undefined ? {} : { decision: { ...item.decision } }),
     ...(item.bundleKey ? { bundleKey: item.bundleKey } : {}),
     bundleCount: item.bundleCount,
     reasonCodes: [...item.reasonCodes],
@@ -192,6 +195,7 @@ function fromPersisted(item: PersistedItem): InboxItem {
     ...(item.taskState === undefined ? {} : { taskState: item.taskState }),
     ...(item.questionState === undefined ? {} : { questionState: item.questionState }),
     ...(feedback === undefined ? {} : { feedback }),
+    ...(item.decision === undefined || !isDecisionRecord(item.decision) ? {} : { decision: { ...item.decision } }),
     ...(item.bundleKey ? { bundleKey: item.bundleKey } : {}),
     bundleCount: typeof item.bundleCount === 'number' && Number.isSafeInteger(item.bundleCount) && item.bundleCount > 0 ? item.bundleCount : 1,
     reasonCodes: Array.isArray(item.reasonCodes) && item.reasonCodes.length > 0 ? item.reasonCodes : [item.reasonCode],
@@ -380,6 +384,23 @@ function isReasonCode(value: string): value is ReasonCode {
     || value === 'TASK_ABORTED'
     || value === 'COMPLETION_SUSPICIOUS'
     || value === 'HOST_STALL_RECOVERED'
+    || value === 'DECISION_PENDING'
+    || value === 'DECISION_MADE'
+}
+
+function isDecisionRecord(value: unknown): value is DecisionRecord {
+  if (value === null || typeof value !== 'object') return false
+  const record = value as Partial<DecisionRecord>
+  return (record.kind === 'pending' || record.kind === 'made')
+    && typeof record.sentence === 'string'
+    && typeof record.explanation === 'string'
+    && typeof record.alternatives === 'string'
+    && typeof record.blastRadius === 'string'
+    && Number.isSafeInteger(record.delegationDepth) && record.delegationDepth! >= 0
+    && (record.parentSessionId === undefined || isSafeOpaqueId(record.parentSessionId))
+    && (record.workingDirectory === undefined || typeof record.workingDirectory === 'string')
+    && (record.sessionTitle === undefined || typeof record.sessionTitle === 'string')
+    && (record.reviewState === undefined || record.reviewState === 'unreviewed' || record.reviewState === 'reviewed' || record.reviewState === 'disputed')
 }
 
 function isSuppressibleReasonCode(value: unknown): value is SuppressibleReasonCode {

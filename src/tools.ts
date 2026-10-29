@@ -175,5 +175,38 @@ export function registerTools(ctx: unknown, service: DeepCanaryService): string[
     output: jsonOutput(),
     execute: async args => asJson(service.jump(args.id)),
   }))
+
+  register(defineTool({
+    name: 'deepcanary_record_decision',
+    description: 'Record a decision you already took under the user\'s standing autonomy rules, so the user can review it in the DeepCanary inbox. Returns the decision id at once and never waits for an answer. Text past a bound is refused with an error, never cut.',
+    parameters: {
+      sentence: { type: 'string', required: true, description: 'The decision in one sentence, at most 200 characters.' },
+      explanation: { type: 'string', required: true, description: 'Why you decided this, self-contained with no vague references, at most 4000 characters.' },
+      alternatives: { type: 'string', required: true, description: 'The alternatives you did not take and why, at most 4000 characters.' },
+      blastRadius: { type: 'string', required: true, description: 'What the decision touches, at most 2000 characters.' },
+    },
+    output: jsonOutput(),
+    execute: async (args, exec) => asJson(await service.recordMadeDecision(callingSession(exec), {
+      sentence: args.sentence,
+      explanation: args.explanation,
+      alternatives: args.alternatives,
+      blastRadius: args.blastRadius,
+    })),
+  }))
+
+  register(defineTool({
+    name: 'deepcanary_list_decisions',
+    description: 'List the decisions this session recorded, newest first, with their review state. Read-only.',
+    parameters: {},
+    output: jsonOutput(),
+    execute: async (_args, exec) => asJson(service.decisionsFor(callingSession(exec))),
+  }))
   return names
+}
+
+/** The session that issued the call; a decision belongs to it and no other session can be named. */
+function callingSession(exec: { agent?: { readonly id: unknown } }): string {
+  const id = exec.agent?.id
+  if (typeof id !== 'string' || id.length === 0) throw new Error('Decisions belong to the calling agent session, and this call has none')
+  return id
 }

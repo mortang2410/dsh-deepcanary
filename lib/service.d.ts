@@ -73,6 +73,21 @@ export declare class DeepCanaryService {
     settings(): PublicSettings;
     updateSettings(input: Record<string, unknown>): Promise<PublicSettings>;
     inbox(limit?: number): PublicInboxItem[];
+    /**
+     * Record a decision the owning session already took. It enters the inbox as a
+     * made decision at C1, so it never notifies, and it bypasses the attention
+     * dedupe ledger because each decision carries its own unique id. Text past a
+     * bound is refused, and nothing is stored when any check fails.
+     */
+    recordMadeDecision(ownerSessionId: string, input: {
+        sentence: unknown;
+        explanation: unknown;
+        alternatives: unknown;
+        blastRadius: unknown;
+        sessionTitle?: unknown;
+    }): Promise<PublicInboxItem>;
+    /** The owning session's own decisions, newest first. Read-only. */
+    decisionsFor(ownerSessionId: string): PublicInboxItem[];
     /** Record one redacted decision outcome for a local, controlled, or replay trial. */
     recordOutcome(id: string, input: unknown): Promise<OutcomeReceipt | undefined>;
     outcomes(limit?: number, source?: OutcomeReceiptInput['source'], trialId?: string): OutcomeReceipt[];

@@ -1,6 +1,6 @@
 import type { PersistentSupervisorStatus } from './supervisor.js';
 /** Stable reason codes emitted by DeepCanary providers. */
-export type ReasonCode = 'HUMAN_APPROVAL_REQUIRED' | 'HUMAN_QUESTION_PENDING' | 'HOST_UNREACHABLE' | 'HOST_SUSPECTED_STALL' | 'TOOL_FAILURE_LOOP' | 'NO_MEANINGFUL_PROGRESS' | 'SUBAGENT_PRESSURE' | 'CONTEXT_PRESSURE' | 'COMPACTION_OCCURRED' | 'TASK_COMPLETED' | 'TASK_FAILED' | 'TASK_ABORTED' | 'COMPLETION_SUSPICIOUS' | 'HOST_STALL_RECOVERED';
+export type ReasonCode = 'HUMAN_APPROVAL_REQUIRED' | 'HUMAN_QUESTION_PENDING' | 'HOST_UNREACHABLE' | 'HOST_SUSPECTED_STALL' | 'TOOL_FAILURE_LOOP' | 'NO_MEANINGFUL_PROGRESS' | 'SUBAGENT_PRESSURE' | 'CONTEXT_PRESSURE' | 'COMPACTION_OCCURRED' | 'TASK_COMPLETED' | 'TASK_FAILED' | 'TASK_ABORTED' | 'COMPLETION_SUSPICIOUS' | 'HOST_STALL_RECOVERED' | 'DECISION_PENDING' | 'DECISION_MADE';
 /** Low-risk event classes that a user may silence persistently from the Inbox. */
 export type SuppressibleReasonCode = 'TASK_COMPLETED' | 'COMPACTION_OCCURRED' | 'SUBAGENT_PRESSURE';
 export declare const SUPPRESSIBLE_REASON_CODES: readonly SuppressibleReasonCode[];
@@ -77,11 +77,44 @@ export interface AttentionVerdict {
 export type InboxStatus = 'open' | 'seen' | 'acknowledged' | 'snoozed' | 'muted' | 'recovered' | 'expired';
 /** Runtime task fact kept separate from the user's Inbox handling state. */
 export type TaskState = 'running' | 'waiting-human' | 'completed' | 'failed' | 'aborted' | 'disposed' | 'unknown';
+/** Whether a decision waits for the user's answer or was already taken under standing autonomy rules. */
+export type DecisionKind = 'pending' | 'made';
+/** Review state of a made decision; a disputed decision stays visible in the inbox. */
+export type DecisionReviewState = 'unreviewed' | 'reviewed' | 'disputed';
+/**
+ * Decision content carried by an inbox item. The owning session is the item's
+ * `sessionId`. Every text field has its own bound and is refused past it, never cut.
+ */
+export interface DecisionRecord {
+    kind: DecisionKind;
+    /** The decision in one sentence, at most 200 characters. */
+    sentence: string;
+    /** Self-contained explanation, at most 4000 characters. */
+    explanation: string;
+    /** Alternatives that were available and not taken, at most 4000 characters. */
+    alternatives: string;
+    /** What the decision touches, at most 2000 characters. */
+    blastRadius: string;
+    /** Host lineage: the dispatching session of a subagent; absent for a top-level session. */
+    parentSessionId?: string;
+    /** Host lineage: 0 for a top-level session, parent depth plus 1 for a subagent. */
+    delegationDepth: number;
+    /** Working directory of the owning session as the host recorded it, at most 500 characters. */
+    workingDirectory?: string;
+    /** Session title, at most 200 characters; absent until the host supplies one. */
+    sessionTitle?: string;
+    /** Set for made decisions. */
+    reviewState?: DecisionReviewState;
+}
 export interface InboxItem extends AttentionVerdict {
     id: string;
     sessionId?: string;
     workspaceId?: string;
-    /** Hashes retained across restart so live sessions can be re-associated without persisting raw IDs. */
+    /**
+     * Hashes of the session and workspace IDs. The raw `sessionId` is persisted too
+     * (src/persistence.ts); the hashes give privacy-safe references and re-associate an
+     * item whose raw ID is absent.
+     */
     sessionRef?: string;
     workspaceRef?: string;
     occurredAt: string;
@@ -111,6 +144,8 @@ export interface InboxItem extends AttentionVerdict {
         note?: string;
         at: string;
     };
+    /** Decision content; present only on decision items. */
+    decision?: DecisionRecord;
     /** Internal privacy-safe hash used to join adjacent events. */
     bundleKey?: string;
     bundleCount: number;
@@ -261,6 +296,7 @@ export interface PublicInboxItem {
         value?: FeedbackValue;
         at: string;
     };
+    decision?: DecisionRecord;
     bundleCount: number;
     reasonCodes: ReasonCode[];
 }

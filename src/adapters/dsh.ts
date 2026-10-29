@@ -78,6 +78,15 @@ interface DshAdapterOptions {
 
 interface SessionStoreLike {
   list?: () => readonly unknown[] | Promise<readonly unknown[]>
+  get?: (id: string) => unknown
+}
+
+/** Host lineage of one session, read from its creation header. */
+export interface SessionLineage {
+  parentSessionId?: string
+  /** 0 for a top-level session; the host omits the header field for it. */
+  delegationDepth: number
+  workingDirectory?: string
 }
 
 interface SessionEventRecord {
@@ -169,6 +178,18 @@ export class ContextDshAdapter implements DshAdapter {
 
   async getSessionSnapshot(sessionId: string): Promise<SessionSnapshot | null> {
     return this.snapshots.get(sessionId) ?? null
+  }
+
+  /** Lineage the host recorded for a live session; undefined when the host does not know it. */
+  sessionLineage(sessionId: string): SessionLineage | undefined {
+    const session = this.sessionStore?.get?.(sessionId)
+    if (!isRecord(session) || !isRecord(session.header)) return undefined
+    const header = session.header
+    return {
+      ...(typeof header.parentSession === 'string' ? { parentSessionId: header.parentSession } : {}),
+      delegationDepth: typeof header.delegationDepth === 'number' ? header.delegationDepth : 0,
+      ...(typeof header.cwd === 'string' ? { workingDirectory: header.cwd } : {}),
+    }
   }
 
   getRuntimeHealth(): Promise<RuntimeHealth> {

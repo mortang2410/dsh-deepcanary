@@ -115,7 +115,8 @@
     "background:host": "npm run build && node ./scripts/background-contract.mjs",
     "reminders:host": "npm run build && node ./scripts/reminders-contract.mjs",
     "settings:host": "npm run build && node ./scripts/settings-contract.mjs",
-    "connection:host": "npm run build && node ./scripts/connection-contract.mjs"
+    "connection:host": "npm run build && node ./scripts/connection-contract.mjs",
+    "decision:host": "npm run build && node ./scripts/decision-contract.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
