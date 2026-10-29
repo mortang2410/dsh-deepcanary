@@ -210,6 +210,11 @@ export declare class DeepCanaryService {
     private toPublic;
     private publicDecision;
     private isPending;
+    /**
+     * A decision stops needing the user once the question is answered, and a made decision
+     * once it has been reviewed or disputed. Until then it counts in the open badge.
+     */
+    private decisionNeedsUser;
     private reminderAuthorityReady;
     private notificationEligible;
     private normalizeLifecycle;

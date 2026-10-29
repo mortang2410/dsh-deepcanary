@@ -533,7 +533,7 @@ export class DeepCanaryService {
   status(): RuntimeStatus {
     const now = Date.now()
     this.normalizeLifecycle(now)
-    const open = this.items.filter(item => this.isPending(item, now)).map(item => item.level)
+    const open = this.items.filter(item => this.isPending(item, now) && this.decisionNeedsUser(item)).map(item => item.level)
     const highest = open.reduce<AttentionLevel>((current, level) => levelValue[level] > levelValue[current] ? level : current, 'C0')
     return {
       plugin: { name: PLUGIN_NAME, version: PLUGIN_VERSION, state: this.hydrated ? 'ready' : 'loading' },
@@ -2347,6 +2347,17 @@ export class DeepCanaryService {
     if (item.status !== 'snoozed' || item.snoozedUntil === undefined) return false
     const until = Date.parse(item.snoozedUntil)
     return Number.isFinite(until) && until <= now
+  }
+
+  /**
+   * A decision stops needing the user once the question is answered, and a made decision
+   * once it has been reviewed or disputed. Until then it counts in the open badge.
+   */
+  private decisionNeedsUser(item: InboxItem): boolean {
+    const decision = item.decision
+    if (decision === undefined) return true
+    if (decision.kind === 'made') return (decision.reviewState ?? 'unreviewed') === 'unreviewed'
+    return decision.answer === undefined
   }
 
   private reminderAuthorityReady(item: InboxItem): boolean {

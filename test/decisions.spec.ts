@@ -345,6 +345,19 @@ describe('decisions', () => {
       await expect(service.answerDecision(requested.id, 'Split the store')).rejects.toThrow(/already been answered/i)
     })
 
+    it('stops counting a decision as open once it no longer needs the user', async () => {
+      const { service } = await open({ top: { cwd } })
+      const made = await service.recordMadeDecision('top', valid)
+      expect(service.status()).toMatchObject({ openInbox: 1, indicator: 'yellow' })
+      await service.reviewDecision(made.id)
+      expect(service.status()).toMatchObject({ openInbox: 0, indicator: 'gray' })
+
+      const pending = await service.requestDecision('top', { ...valid, options })
+      expect(service.status()).toMatchObject({ openInbox: 1, indicator: 'orange' })
+      await service.answerDecision(pending.id, 'Keep the store')
+      expect(service.status()).toMatchObject({ openInbox: 0, indicator: 'gray' })
+    })
+
     it('keeps answered decisions in All and removes them from Pending', async () => {
       const { service } = await open({ top: { cwd } })
       const requested = await service.requestDecision('top', { ...valid, options })

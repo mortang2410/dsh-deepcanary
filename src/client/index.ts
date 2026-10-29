@@ -331,6 +331,7 @@ const zh = {
   'item.decisionExplanation': '说明',
   'item.decisionSession': '所属会话：{session}',
   'item.decisionAnswer': '你的回答',
+  'item.decisionAnswerGiven': '你的回答：{answer}',
   'item.decisionSubmit': '提交回答',
   'item.decisionQueued': '等待送达',
   'item.decisionDelivered': '已送达',
@@ -585,6 +586,7 @@ const en = {
   'item.decisionExplanation': 'Explanation',
   'item.decisionSession': 'Session: {session}',
   'item.decisionAnswer': 'Your answer',
+  'item.decisionAnswerGiven': 'Your answer: {answer}',
   'item.decisionSubmit': 'Submit answer',
   'item.decisionQueued': 'Queued',
   'item.decisionDelivered': 'Delivered',
@@ -2057,6 +2059,8 @@ function itemCard(item: ClientItem, context: InboxRenderContext): ReactNode {
     if (decision.kind === 'pending') {
       children.push(createElement('p', { className: 'dsc-card-suggestion', key: 'delivery-state' },
         translate(t, decision.deliveryState === 'delivered' ? 'item.decisionDelivered' : 'item.decisionQueued')))
+      if (decision.answer !== undefined) children.push(createElement('p', { key: 'answer-text' },
+        translate(t, 'item.decisionAnswerGiven', { answer: decision.answer })))
       if (decision.answer === undefined && decision.sessionUnavailable !== true) children.push(createElement('form', {
         key: 'decision-answer',
         onSubmit: (event: FormEvent<HTMLFormElement>) => {
