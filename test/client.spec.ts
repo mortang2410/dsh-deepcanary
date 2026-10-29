@@ -1,6 +1,9 @@
 import { readFile } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
 import { handleNotificationClick, positionSelectedAttention } from '../src/client/attention-navigation.js'
+import { filterInboxItems, groupDecisionItems, orderDecisionBlocks, showsAttentionItems } from '../src/client/decision-groups.js'
+import type { DecisionGroupingEntry, DecisionFilter } from '../src/client/decision-groups.js'
+import { decisionSessionLabel, workingDirectoryBasename } from '../src/client/session-navigation.js'
 
 describe('DeepCanary attention navigation', () => {
   it('returns a notification click to the selected alert in order', () => {
@@ -70,6 +73,61 @@ describe('DeepCanary attention navigation', () => {
   })
 })
 
+describe('DeepCanary decision inbox views', () => {
+  const item = (id: string, decision?: DecisionGroupingEntry['decision']): DecisionGroupingEntry => ({
+    id, sessionId: id, occurredAt: `2026-01-0${id.length}T00:00:00.000Z`, ...(decision === undefined ? {} : { decision }),
+  })
+
+  it('shows every entry by default and keeps attention entries in the pending view', () => {
+    const entries = [
+      item('attention'),
+      item('pending', { kind: 'pending' }),
+      item('made', { kind: 'made', reviewState: 'unreviewed' }),
+      item('reviewed', { kind: 'made', reviewState: 'reviewed' }),
+      item('disputed', { kind: 'made', reviewState: 'disputed' }),
+    ]
+    const ids = (filter: DecisionFilter) => filterInboxItems(entries, filter).map(entry => entry.id)
+
+    expect(ids('all')).toEqual(['attention', 'pending', 'made', 'reviewed', 'disputed'])
+    expect(ids('pending')).toEqual(['attention', 'pending'])
+    expect(ids('made')).toEqual(['made'])
+    expect(ids('reviewed')).toEqual(['reviewed'])
+    expect(ids('disputed')).toEqual(['disputed'])
+    expect(showsAttentionItems('all')).toBe(true)
+    expect(showsAttentionItems('pending')).toBe(true)
+    expect(showsAttentionItems('made')).toBe(false)
+    expect(showsAttentionItems('reviewed')).toBe(false)
+    expect(showsAttentionItems('disputed')).toBe(false)
+  })
+
+  it('keeps attention cards and decision groups in the incoming priority order', () => {
+    const entries = [item('urgent'), item('question', { kind: 'pending' }), item('routine')]
+    const groups = groupDecisionItems([entries[1]!])
+    const blocks = orderDecisionBlocks(entries, groups)
+    expect(blocks.map(block => block.kind === 'attention' ? `attention:${block.item.id}` : `group:${block.group.sessionId}`))
+      .toEqual(['attention:urgent', 'group:question', 'attention:routine'])
+  })
+
+  it('uses the basename of a Windows working directory until the title arrives', () => {
+    const directory = 'C:\\work\\app'
+    expect(workingDirectoryBasename(directory)).toBe('app')
+    expect(decisionSessionLabel({ sessionId: 'child', decision: { workingDirectory: directory } }, { id: 'child', cwd: directory })).toBe('app')
+  })
+
+  it('uses the session-list title over the basename and exposes nested group data for rendering', () => {
+    const entry = item('child', { kind: 'made', parentSessionId: 'root', delegationDepth: 1, workingDirectory: '/work/app' })
+    const session = { id: 'child', cwd: '/work/app', parentId: 'root' }
+    const groups = groupDecisionItems([entry], { byId: { root: { id: 'root', cwd: '/work/app' }, child: session } })
+
+    expect(groups[0]).toMatchObject({
+      sessionId: 'root', title: 'app', workingDirectory: '/work/app',
+      children: [{ sessionId: 'child', depth: 1, title: 'app', items: [{ id: 'child' }] }],
+    })
+    expect(decisionSessionLabel(entry, session)).toBe('app')
+    expect(decisionSessionLabel(entry, { ...session, title: 'Session title event' })).toBe('Session title event')
+  })
+})
+
 describe('DeepCanary DSH client surface', () => {
   it('declares the DSH client module and all four interaction gates', async () => {
     const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as {
@@ -109,6 +167,14 @@ describe('DeepCanary DSH client surface', () => {
     expect(source).toContain('new SettingsDraft')
     expect(source).toContain('requestId: makeRequestId()')
     expect(source).toContain('positionSelectedAttention')
+    expect(source).toContain('filterDecisionLists(items, scheduledItems, decisionFilter, state.selectedId)')
+    expect(source).toContain('groupDecisionItems')
+    expect(source).toContain('orderDecisionBlocks(visibleEntries, decisionGroups)')
+    expect(source).toContain('orderDecisionBlocks(visibleScheduledEntries, scheduledGroups)')
+    expect(source).toContain('useSyncExternalStore')
+    expect(source).toContain('subscribeSessionList')
+    expect(source).toContain('data-decision-filter')
+    expect(source).toContain('dsc-session-group')
     expect(source).toContain('handleNotificationClick')
     expect(source).toContain('notificationTitle')
     expect(source).toContain('claimNotificationBatch')
@@ -123,5 +189,17 @@ describe('DeepCanary DSH client surface', () => {
     expect(source).toContain('visibilitychange')
     expect(source).toContain('notificationGeneration(item)')
     expect(source).not.toContain('function SettingsForm')
+  })
+
+  it('uses the shared filter and group path for scheduled decisions', async () => {
+    const source = await readFile(new URL('../src/client/index.ts', import.meta.url), 'utf8')
+
+    expect(source).toContain('filterDecisionLists(items, scheduledItems, decisionFilter, state.selectedId)')
+    expect(source).toContain('if (activeFilter !== decisionFilter)')
+    expect(source).toContain('setDecisionFilter(activeFilter)')
+    expect(source).toContain('groupDecisionItems(scheduledDecisionEntries, sessionListSnapshot)')
+    expect(source).toContain('orderDecisionBlocks(visibleScheduledEntries, scheduledGroups)')
+    expect(source).toContain('...scheduledBlocks.map(block =>')
+    expect(source).toContain('if (snapshot !== undefined && hasDecisions) body.push')
   })
 })

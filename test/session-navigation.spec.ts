@@ -70,16 +70,21 @@ describe('version-aware session navigation', () => {
 })
 
 describe('decision session label', () => {
-  it('names the session by its title when the host supplied one', () => {
-    expect(decisionSessionLabel({ sessionId: 'session-a', decision: { sessionTitle: 'Store refactor' } })).toBe('Store refactor')
+  it('uses the current Host title projected from the session title event', () => {
+    expect(decisionSessionLabel({ sessionId: 'session-a' }, { id: 'session-a', title: 'Store refactor' })).toBe('Store refactor')
   })
 
-  it('falls back to the session ID, so decisions from two sessions stay distinguishable', () => {
+  it('uses the working-directory basename until the Host title arrives', () => {
+    const item = { sessionId: 'session-a', decision: { workingDirectory: '/work/project', sessionTitle: 'stale tool title' } }
+    expect(decisionSessionLabel(item, { id: 'session-a', cwd: '/work/project' })).toBe('project')
+    expect(decisionSessionLabel(item, { id: 'session-a', cwd: '/work/project', title: 'Session title event' })).toBe('Session title event')
+  })
+
+  it('falls back to the session ID when neither a title nor working directory exists', () => {
     expect(decisionSessionLabel({ sessionId: 'session-a', decision: {} })).toBe('session-a')
-    expect(decisionSessionLabel({ sessionId: 'session-b', decision: { sessionTitle: '' } })).toBe('session-b')
   })
 
-  it('names nothing for an item with no session', () => {
+  it('names nothing for an item with no session or working directory', () => {
     expect(decisionSessionLabel({ decision: {} })).toBeUndefined()
   })
 })

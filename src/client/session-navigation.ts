@@ -1,10 +1,24 @@
 /** Navigation belongs to uiWorkspace on newer DSH, not the Session Controller. */
+export interface SessionSummary {
+  id: string
+  title?: string
+  cwd?: string
+  parentId?: string
+  origin?: 'subagent'
+}
+
+export interface SessionListSnapshot {
+  phase: string
+  ids: readonly string[]
+  byId?: Readonly<Record<string, SessionSummary>>
+}
+
 export interface SessionNavigationContext {
   get?: (name: string) => unknown
   uiWorkspace?: { openSession: (sessionId: string) => void }
   sessions: {
     open?: (sessionId: string) => void
-    list?: { getSnapshot?: () => { phase: string; ids: readonly string[] } }
+    list?: { getSnapshot?: () => SessionListSnapshot }
   }
 }
 
@@ -39,10 +53,18 @@ export function openAttentionSession(ctx: SessionNavigationContext, sessionId: s
   }
 }
 
-/**
- * The session a decision card names: the host's session title when it supplied one,
- * otherwise the session ID. An empty title falls back to the ID as well.
- */
-export function decisionSessionLabel(item: { sessionId?: string; decision?: { sessionTitle?: string } }): string | undefined {
-  return item.decision?.sessionTitle || item.sessionId
+export function workingDirectoryBasename(directory: string | undefined): string | undefined {
+  return directory?.split(/[\\/]/).filter(Boolean).pop()
+}
+
+/** Use the current Host title, otherwise the working-directory basename as a live placeholder. */
+export function decisionSessionLabel(
+  item: { sessionId?: string; decision?: { workingDirectory?: string; sessionTitle?: string } },
+  session?: SessionSummary,
+): string | undefined {
+  const title = session?.title?.trim()
+  if (title) return title
+  const directory = session?.cwd || item.decision?.workingDirectory
+  const basename = workingDirectoryBasename(directory)
+  return basename || item.sessionId
 }

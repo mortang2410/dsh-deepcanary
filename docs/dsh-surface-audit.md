@@ -5,6 +5,7 @@ DeepCanary 0.1.6-rc.4 uses released DSH 0.2.1-rc.2 for WebUI and official Window
 | Public surface | Use and degradation |
 | --- | --- |
 | Session store/events and question projection | Subscribe/reconcile at public sequence watermarks; preserve unknown authority and pending question identities. |
+| Session list | Read current title and working directory, and parent/origin metadata for subagent grouping; a later title event replaces the basename placeholder. |
 | Public Job Registry and Session job lifecycle | Observe owner-scoped registration/settlement and output byte counts; reconcile durable owner-matched facts after replacement. Waited outcomes, cancellation and teardown remain quiet. |
 | Tools | Bounded metadata reads, explicit reminder actions and read-only dry-run. |
 | Optional Agent/Subagent events | Normalize runtime failures and bounded pressure; missing services leave their providers inactive. |

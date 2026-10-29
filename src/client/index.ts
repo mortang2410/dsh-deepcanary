@@ -1,10 +1,12 @@
-import { createElement, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createElement, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type {
   CSSProperties, FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent, ReactNode,
 } from 'react'
 import type { ConfigForm, ConfigFormSnapshot, SettingsPluginsTabOwnerProps } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { handleNotificationClick, positionSelectedAttention } from './attention-navigation.js'
+import { filterDecisionLists, groupDecisionItems, orderDecisionBlocks } from './decision-groups.js'
+import type { DecisionFilter, DecisionSessionGroup } from './decision-groups.js'
 import { decisionSessionLabel, hasCatalogSession, openAttentionSession } from './session-navigation.js'
 import { rendererCapabilities } from './capabilities.js'
 import { inboxStyles } from './inbox-styles.js'
@@ -12,7 +14,7 @@ import { claimNotificationBatch } from './notification-dispatch.js'
 import { formatReasonMessage } from './message-text.js'
 import { notificationGeneration, notificationKey } from '../core/reminders.js'
 import { SettingsDraft } from '../settings-draft.js'
-import type { SessionNavigationContext } from './session-navigation.js'
+import type { SessionListSnapshot, SessionNavigationContext, SessionSummary } from './session-navigation.js'
 
 type Translate = (key: string, params?: Record<string, unknown>) => string
 
@@ -58,7 +60,7 @@ type ClientItem = {
   taskState?: 'running' | 'waiting-human' | 'completed' | 'failed' | 'aborted' | 'disposed' | 'unknown'
   feedback?: { useful: boolean; value?: 'useful' | 'not-relevant' | 'wrong-level' | 'already-resolved'; at: string }
   /** Decision content; present only on decision items. Options are absent on made decisions. */
-  decision?: { kind: 'pending' | 'made'; sentence: string; explanation: string; options?: string[]; sessionTitle?: string; answer?: string; reviewState?: 'unreviewed' | 'reviewed' | 'disputed'; disputeText?: string; deliveryState?: 'queued' | 'delivered'; sessionUnavailable?: boolean }
+  decision?: { kind: 'pending' | 'made'; sentence: string; explanation: string; options?: string[]; parentSessionId?: string; delegationDepth?: number; workingDirectory?: string; sessionTitle?: string; answer?: string; reviewState?: 'unreviewed' | 'reviewed' | 'disputed'; disputeText?: string; deliveryState?: 'queued' | 'delivered'; sessionUnavailable?: boolean }
   bundleCount: number
 }
 
@@ -143,6 +145,8 @@ type ControllerState = {
 
 type Controller = {
   getState: () => ControllerState
+  getSessionListSnapshot: () => SessionListSnapshot | undefined
+  subscribeSessionList: (listener: () => void) => () => void
   subscribe: (listener: () => void) => () => void
   start: () => void
   dispose: () => void
@@ -230,6 +234,14 @@ const zh = {
   'panel.policyHint': 'C1 建议查看 · C2 需要处理 · C3 立即处理',
   'panel.policyDetails': '提醒策略与通知预算',
   'panel.inbox': '待处理',
+  'panel.filter.label': '筛选收件箱',
+  'panel.filter.all': '全部',
+  'panel.filter.pending': '待处理',
+  'panel.filter.made': '已作决定',
+  'panel.filter.reviewed': '已复核',
+  'panel.filter.disputed': '有异议',
+  'panel.filter.empty': '当前筛选中没有条目。',
+  'panel.sessionDirectory': '工作目录：{directory}',
   'panel.delivery': '通知预算 {used}/{limit}，剩余 {remaining} · 去重 {dedupe} 分钟 · 合并 {bundle} 秒 · {quiet}',
   'panel.quiet.active': '静默时段 {start}–{end}，当前生效',
   'panel.quiet.inactive': '静默时段 {start}–{end}，当前未生效',
@@ -476,6 +488,14 @@ const en = {
   'panel.policyHint': 'C1 Review · C2 Action needed · C3 Act now',
   'panel.policyDetails': 'Reminder policy and notification budget',
   'panel.inbox': 'Inbox',
+  'panel.filter.label': 'Filter inbox',
+  'panel.filter.all': 'All',
+  'panel.filter.pending': 'Pending',
+  'panel.filter.made': 'Made',
+  'panel.filter.reviewed': 'Reviewed',
+  'panel.filter.disputed': 'Disputed',
+  'panel.filter.empty': 'No entries match this filter.',
+  'panel.sessionDirectory': 'Working directory: {directory}',
   'panel.delivery': 'Interrupt budget {used}/{limit}, {remaining} remaining · dedupe {dedupe}m · bundle {bundle}s · {quiet}',
   'panel.quiet.active': 'Quiet hours {start}–{end}, active now',
   'panel.quiet.inactive': 'Quiet hours {start}–{end}, inactive now',
@@ -918,6 +938,8 @@ function createController(ctx: ClientContext): Controller {
 
   const controller: Controller = {
     getState: () => state,
+    getSessionListSnapshot: () => sessions.list?.getSnapshot?.(),
+    subscribeSessionList: listener => sessions.list?.subscribe?.(listener) ?? (() => {}),
     subscribe: listener => {
       listeners.add(listener)
       return () => { listeners.delete(listener) }
@@ -1959,7 +1981,16 @@ function decisionTraceDetails(item: ClientItem, t: Translate): ReactNode | undef
   )
 }
 
-function itemCard(item: ClientItem, state: ControllerState, t: Translate, controller: Controller, selected: boolean): ReactNode {
+type InboxRenderContext = {
+  state: ControllerState
+  t: Translate
+  controller: Controller
+  sessionListSnapshot: SessionListSnapshot | undefined
+  selectedId: string | undefined
+}
+
+function itemCard(item: ClientItem, context: InboxRenderContext): ReactNode {
+  const { state, t, controller, sessionListSnapshot, selectedId } = context
   const busy = state.pending.has(item.id)
   const canReturn = item.sessionId !== undefined
     && (item.targetAvailable !== false || controller.hasHistoricalSession(item.sessionId))
@@ -1984,7 +2015,10 @@ function itemCard(item: ClientItem, state: ControllerState, t: Translate, contro
     const decision = item.decision
     children.push(createElement('p', { className: 'dsc-decision-kind', 'data-kind': decision.kind, key: 'decision-kind' },
       translate(t, decision.kind === 'pending' ? 'item.decisionKind.pending' : 'item.decisionKind.made')))
-    const session = decisionSessionLabel(item)
+    const sessionSummary: SessionSummary | undefined = item.sessionId === undefined
+      ? undefined
+      : sessionListSnapshot?.byId?.[item.sessionId]
+    const session = decisionSessionLabel(item, sessionSummary)
     if (session !== undefined) children.push(createElement('p', { className: 'dsc-decision-session', key: 'decision-session' },
       translate(t, 'item.decisionSession', { session })))
     children.push(createElement('p', { className: 'dsc-decision-sentence', key: 'decision-sentence' }, decision.sentence))
@@ -2145,17 +2179,64 @@ function itemCard(item: ClientItem, state: ControllerState, t: Translate, contro
     tabIndex: -1,
     key: item.id,
     'data-deepcanary-item': item.id,
-    'data-selected': selected,
+    'data-selected': selectedId === item.id,
     'data-kind': item.decision?.kind ?? 'attention',
+  }, ...children)
+}
+
+function decisionSessionGroup(
+  group: DecisionSessionGroup<ClientItem>,
+  rootSessionId: string,
+  parentDepth: number,
+  context: InboxRenderContext,
+): ReactNode {
+  const children: ReactNode[] = [
+    createElement('header', { className: 'dsc-session-group-header', key: 'header' },
+      createElement('h4', { className: 'dsc-session-group-title' }, group.title),
+      group.workingDirectory === undefined ? null : createElement('small', { className: 'dsc-session-directory' },
+        translate(context.t, 'panel.sessionDirectory', { directory: group.workingDirectory }))),
+    ...group.items.map(item => itemCard(item, context)),
+  ]
+  for (const child of group.children) {
+    children.push(decisionSessionGroup(child, rootSessionId, group.depth, context))
+  }
+  return createElement('section', {
+    key: group.sessionId,
+    className: 'dsc-session-group',
+    'data-session-group': group.sessionId,
+    'data-root-session': rootSessionId,
+    'data-depth': group.depth,
+    style: { marginInlineStart: `${Math.max(0, Math.min(8, group.depth - parentDepth)) * 16}px` },
   }, ...children)
 }
 
 function DeepCanaryOverlay(props: { t: Translate; controller: Controller }): ReactNode {
   const state = useController(props.controller)
+  const sessionListSnapshot = useSyncExternalStore(
+    props.controller.subscribeSessionList,
+    props.controller.getSessionListSnapshot,
+    props.controller.getSessionListSnapshot,
+  )
   const [visibleItems, setVisibleItems] = useState(50)
   const [visibleScheduled, setVisibleScheduled] = useState(10)
-  const selectedIndex = state.snapshot?.inbox.findIndex(item => item.id === state.selectedId) ?? -1
-  const scheduledIndex = state.snapshot?.scheduled?.findIndex(item => item.id === state.selectedId) ?? -1
+  const [decisionFilter, setDecisionFilter] = useState<DecisionFilter>('all')
+  const snapshot = state.snapshot
+  const items = snapshot?.inbox ?? []
+  const scheduledItems = snapshot?.scheduled ?? []
+  const decisionLists = filterDecisionLists(items, scheduledItems, decisionFilter, state.selectedId)
+  const activeFilter = decisionLists.activeFilter
+  const hasDecisions = decisionLists.hasDecisions
+  const filteredItems = decisionLists.inbox
+  const scheduled = decisionLists.scheduled
+  const selectedIndex = filteredItems.findIndex(item => item.id === state.selectedId)
+  const scheduledIndex = scheduled.findIndex(item => item.id === state.selectedId)
+  useEffect(() => {
+    if (activeFilter !== decisionFilter) {
+      setDecisionFilter(activeFilter)
+      setVisibleItems(50)
+      setVisibleScheduled(10)
+    }
+  }, [activeFilter, decisionFilter])
   useLayoutEffect(() => {
     if (selectedIndex >= visibleItems) setVisibleItems(Math.ceil((selectedIndex + 1) / 50) * 50)
     if (scheduledIndex >= visibleScheduled) setVisibleScheduled(Math.ceil((scheduledIndex + 1) / 10) * 10)
@@ -2178,7 +2259,7 @@ function DeepCanaryOverlay(props: { t: Translate; controller: Controller }): Rea
       positionedId.current = state.selectedId
       if (focusLost) [...elements].find(element => element.dataset.deepcanaryItem === state.selectedId)?.focus({ preventScroll: true })
     }
-  }, [state.open, state.selectedId, state.snapshot, visibleItems, visibleScheduled])
+  }, [state.open, state.selectedId, state.snapshot, activeFilter, visibleItems, visibleScheduled])
   useEffect(() => {
     if (!state.open) return
     const onKeyDown = (event: globalThis.KeyboardEvent): void => {
@@ -2206,7 +2287,6 @@ function DeepCanaryOverlay(props: { t: Translate; controller: Controller }): Rea
   }, [props.controller, props.t, state.snapshot, state.lastSyncedAt])
   if (!state.open) return null
 
-  const snapshot = state.snapshot
   const statusState = state.failed || state.protocolUnsupported ? 'offline' : state.loading ? 'loading' : 'ready'
   const statusText = state.failed
     ? translate(props.t, 'panel.status.offline')
@@ -2215,8 +2295,21 @@ function DeepCanaryOverlay(props: { t: Translate; controller: Controller }): Rea
     : state.loading
       ? translate(props.t, 'panel.status.loading')
       : translate(props.t, 'panel.status.ready')
-  const items = snapshot?.inbox ?? []
-  const scheduled = snapshot?.scheduled ?? []
+  const visibleEntries = filteredItems.slice(0, visibleItems)
+  const decisionEntries = visibleEntries.filter((item): item is ClientItem & { decision: NonNullable<ClientItem['decision']> } => item.decision !== undefined)
+  const decisionGroups = groupDecisionItems(decisionEntries, sessionListSnapshot)
+  const inboxBlocks = orderDecisionBlocks(visibleEntries, decisionGroups)
+  const visibleScheduledEntries = scheduled.slice(0, visibleScheduled)
+  const scheduledDecisionEntries = visibleScheduledEntries.filter((item): item is ClientItem & { decision: NonNullable<ClientItem['decision']> } => item.decision !== undefined)
+  const scheduledGroups = groupDecisionItems(scheduledDecisionEntries, sessionListSnapshot)
+  const scheduledBlocks = orderDecisionBlocks(visibleScheduledEntries, scheduledGroups)
+  const renderContext: InboxRenderContext = {
+    state,
+    t: props.t,
+    controller: props.controller,
+    sessionListSnapshot,
+    selectedId: state.selectedId,
+  }
   const panelStyle = {
     '--dsc-width': state.width + 'px',
     '--dsc-height': state.height + 'px',
@@ -2255,6 +2348,19 @@ function DeepCanaryOverlay(props: { t: Translate; controller: Controller }): Rea
       createElement('summary', null, translate(props.t, 'panel.policyDetails')), ...policy))
     if (state.protocolUnsupported) body.push(createElement('p', { className: 'dsc-note', key: 'protocol' }, translate(props.t, 'panel.updateRequired')))
   }
+  if (snapshot !== undefined && hasDecisions) body.push(createElement('div', {
+    className: 'dsc-decision-filters',
+    key: 'decision-filters',
+    role: 'group',
+    'aria-label': translate(props.t, 'panel.filter.label'),
+  }, ...(['all', 'pending', 'made', 'reviewed', 'disputed'] as const).map(filter => createElement('button', {
+    key: filter,
+    className: 'dsc-filter-button',
+    type: 'button',
+    'data-decision-filter': filter,
+    'aria-pressed': activeFilter === filter,
+    onClick: () => { setDecisionFilter(filter); setVisibleItems(50); setVisibleScheduled(10) },
+  }, translate(props.t, `panel.filter.${filter}`)))))
   if (state.failed && snapshot === undefined) {
     body.push(createElement('div', { className: 'dsc-note', key: 'failed' },
       createElement('strong', null, translate(props.t, 'state.failed')),
@@ -2274,18 +2380,27 @@ function DeepCanaryOverlay(props: { t: Translate; controller: Controller }): Rea
   } else {
     body.push(createElement('h3', { className: 'dsc-group-title', key: 'group' },
       translate(props.t, 'panel.inbox')))
-    for (const item of items.slice(0, visibleItems)) {
-      body.push(itemCard(item, state, props.t, props.controller, state.selectedId === item.id))
+    if (filteredItems.length === 0) {
+      body.push(createElement('p', { className: 'dsc-note', key: 'filter-empty' }, translate(props.t, 'panel.filter.empty')))
+    } else {
+      for (const block of inboxBlocks) {
+        body.push(block.kind === 'attention'
+          ? itemCard(block.item, renderContext)
+          : decisionSessionGroup(block.group, block.group.sessionId, 0, renderContext))
+      }
+      if (filteredItems.length > visibleItems) body.push(createElement('button', {
+        key: 'more-items', type: 'button', className: 'dsc-toolbar-button', onClick: () => { setVisibleItems(value => value + 50) },
+      }, translate(props.t, 'panel.moreItems', { count: Math.min(50, filteredItems.length - visibleItems) })))
     }
-    if (items.length > visibleItems) body.push(createElement('button', {
-      key: 'more-items', type: 'button', className: 'dsc-toolbar-button', onClick: () => { setVisibleItems(value => value + 50) },
-    }, translate(props.t, 'panel.moreItems', { count: Math.min(50, items.length - visibleItems) })))
   }
   if (scheduled.length > 0) body.push(createElement('details', {
     className: 'dsc-scheduled', key: 'scheduled', ...(items.length === 0 || scheduledIndex >= 0 ? { open: true } : {}),
   }, createElement('summary', null, translate(props.t, 'panel.scheduled', { count: scheduled.length })),
   createElement('p', { className: 'dsc-card-suggestion' }, translate(props.t, 'panel.scheduledHint')),
-  ...scheduled.slice(0, visibleScheduled).map(item => itemCard(item, state, props.t, props.controller, state.selectedId === item.id)),
+  ...scheduledBlocks.map(block => block.kind === 'attention'
+     ? itemCard(block.item, renderContext)
+     : decisionSessionGroup(block.group, block.group.sessionId, 0, renderContext)),
+
   scheduled.length > visibleScheduled ? createElement('button', {
     type: 'button', className: 'dsc-toolbar-button', onClick: () => { setVisibleScheduled(value => value + 10) },
   }, translate(props.t, 'panel.moreItems', { count: Math.min(10, scheduled.length - visibleScheduled) })) : null))

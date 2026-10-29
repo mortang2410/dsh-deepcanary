@@ -6,6 +6,8 @@ import { retainInboxItems } from '../src/core/inbox-retention.js'
 import { DeepCanaryService } from '../src/service.js'
 import { registerTools } from '../src/tools.js'
 import type { InboxItem } from '../src/types.js'
+import { filterDecisionLists, filterInboxItems, groupDecisionItems } from '../src/client/decision-groups.js'
+import type { DecisionGroupingEntry } from '../src/client/decision-groups.js'
 
 interface FakeHeader {
   cwd?: string
@@ -28,6 +30,92 @@ const valid = {
   alternatives: 'A separate decisions file was considered and rejected for the reason above.',
   blastRadius: 'Only the inbox persistence path.',
 }
+
+function groupingItem(
+  id: string,
+  sessionId: string,
+  occurredAt: string,
+  decision: Partial<NonNullable<DecisionGroupingEntry['decision']>> = {},
+): DecisionGroupingEntry {
+  return { id, sessionId, occurredAt, decision: { kind: 'made', ...decision } }
+}
+
+describe('decision session grouping', () => {
+  it('groups under the root, nests subagents by depth, and orders each session chronologically', () => {
+    const items = [
+      groupingItem('root-late', 'root', '2026-01-03T00:00:00.000Z'),
+      groupingItem('child-late', 'child', '2026-01-04T00:00:00.000Z', { parentSessionId: 'root', delegationDepth: 1 }),
+      groupingItem('grandchild', 'grandchild', '2026-01-05T00:00:00.000Z', { parentSessionId: 'child', delegationDepth: 2 }),
+      groupingItem('root-early', 'root', '2026-01-01T00:00:00.000Z'),
+      groupingItem('child-early', 'child', '2026-01-02T00:00:00.000Z', { parentSessionId: 'root', delegationDepth: 1 }),
+    ]
+    const sessions = { byId: {
+      root: { id: 'root', cwd: '/work/app' },
+      child: { id: 'child', parentId: 'root', cwd: '/work/app', title: 'Index work' },
+      grandchild: { id: 'grandchild', parentId: 'child', cwd: '/work/worker' },
+    } }
+
+    expect(groupDecisionItems(items, sessions)).toMatchObject([{
+      sessionId: 'root', depth: 0, title: 'app', workingDirectory: '/work/app',
+      items: [{ id: 'root-early' }, { id: 'root-late' }],
+      children: [{
+        sessionId: 'child', depth: 1, title: 'Index work',
+        items: [{ id: 'child-early' }, { id: 'child-late' }],
+        children: [{ sessionId: 'grandchild', depth: 2, title: 'worker', items: [{ id: 'grandchild' }] }],
+      }],
+    }])
+  })
+
+  it('derives delegation depth from Host subagent lineage when the decision has no depth', () => {
+    const item = groupingItem('child-entry', 'child', '2026-01-01T00:00:00.000Z')
+    const groups = groupDecisionItems([item], { byId: {
+      root: { id: 'root' },
+      child: { id: 'child', parentId: 'root', origin: 'subagent' },
+    } })
+
+    expect(groups).toMatchObject([{ sessionId: 'root', children: [{ sessionId: 'child', depth: 1, items: [{ id: 'child-entry' }] }] }])
+  })
+
+  it('does not nest a non-subagent fork just because its header names a source session', () => {
+    const items = [
+      groupingItem('root-entry', 'root', '2026-01-01T00:00:00.000Z'),
+      groupingItem('fork-entry', 'fork', '2026-01-02T00:00:00.000Z', {
+        parentSessionId: 'root', delegationDepth: 0, workingDirectory: '/work/fork',
+      }),
+    ]
+    const groups = groupDecisionItems(items, { byId: {
+      root: { id: 'root', cwd: '/work/app' },
+      fork: { id: 'fork', parentId: 'root', cwd: '/work/fork' },
+    } })
+
+    expect(groups.map(group => group.sessionId)).toEqual(['root', 'fork'])
+    expect(groups[0]?.children).toEqual([])
+  })
+
+  it('replaces the working-directory placeholder when the session title arrives later', () => {
+    const item = groupingItem('entry', 'root', '2026-01-01T00:00:00.000Z', {
+      sessionTitle: 'stale tool title', workingDirectory: '/work/project',
+    })
+    const before = groupDecisionItems([item], { byId: { root: { id: 'root', cwd: '/work/project' } } })
+    const after = groupDecisionItems([item], { byId: { root: { id: 'root', cwd: '/work/project', title: 'Session title event' } } })
+
+    expect(before[0]?.title).toBe('project')
+    expect(after[0]?.title).toBe('Session title event')
+  })
+
+  it('keeps an unresolved session entry and its unavailable marker inside a fallback root', () => {
+    const missing = groupingItem('orphan', 'ghost', '2026-01-01T00:00:00.000Z', {
+      parentSessionId: 'missing-root', delegationDepth: 1, workingDirectory: '/work/ghost', sessionUnavailable: true,
+    })
+
+    const [root] = groupDecisionItems([missing])
+
+    expect(root).toMatchObject({
+      sessionId: 'missing-root',
+      children: [{ sessionId: 'ghost', title: 'ghost', items: [{ id: 'orphan', decision: { sessionUnavailable: true } }] }],
+    })
+  })
+})
 
 describe('decisions', () => {
   const directories: string[] = []
@@ -255,6 +343,18 @@ describe('decisions', () => {
       const answered = await service.answerDecision(requested.id, 'Keep the store')
       expect(answered.decision).toMatchObject({ answer: 'Keep the store', deliveryState: 'queued' })
       await expect(service.answerDecision(requested.id, 'Split the store')).rejects.toThrow(/already been answered/i)
+    })
+
+    it('keeps answered decisions in All and removes them from Pending', async () => {
+      const { service } = await open({ top: { cwd } })
+      const requested = await service.requestDecision('top', { ...valid, options })
+      await service.answerDecision(requested.id, 'Keep the store')
+      const inbox = service.snapshot().inbox
+
+      expect(inbox).toHaveLength(1)
+      expect(inbox[0]?.decision?.answer).toBe('Keep the store')
+      expect(filterInboxItems(inbox, 'pending')).toEqual([])
+      expect(filterInboxItems(inbox, 'all')).toEqual(inbox)
     })
 
     it('refuses an overlong answer, accepts 8000 characters, and keeps the committed answer across restart', async () => {
@@ -693,6 +793,40 @@ describe('decisions', () => {
       expect(service.snooze(requested.id, 15)).toBe(true)
       expect(service.acknowledge(requested.id)).toBe(false)
       expect(service.snapshot().scheduled?.[0]).toMatchObject({ id: requested.id, status: 'snoozed', reminderPending: true })
+    })
+
+    it('filters and groups scheduled decisions while retaining scheduled attention in All and Pending', async () => {
+      const { service } = await open({ top: { cwd } })
+      const pending = await service.requestDecision('top', { ...valid, options })
+      const made = await service.recordMadeDecision('top', { ...valid, sentence: 'A made decision.' })
+      const attention = await service.ingest({
+        schemaVersion: 1,
+        id: 'scheduled-attention',
+        occurredAt: new Date().toISOString(),
+        source: 'session',
+        kind: 'HUMAN_QUESTION_PENDING',
+        sessionId: 'top',
+        severityHint: 3,
+        evidence: [{ type: 'session-event', authority: 'host', ref: 'question', summary: 'the agent is waiting for an answer' }],
+        dedupeKey: 'question:scheduled-attention',
+        data: {},
+      })
+      expect(attention).toBeDefined()
+      for (const item of [pending, made, attention!]) expect(service.snooze(item.id, 15)).toBe(true)
+      const scheduled = service.snapshot().scheduled ?? []
+      const all = filterDecisionLists([], scheduled, 'all')
+      const pendingView = filterDecisionLists([], scheduled, 'pending')
+      const madeView = filterDecisionLists([], scheduled, 'made')
+      expect(all.hasDecisions).toBe(true)
+      expect(all.scheduled.map(item => item.id)).toEqual(expect.arrayContaining([pending.id, made.id, attention!.id]))
+      expect(pendingView.scheduled.map(item => item.id)).toEqual(expect.arrayContaining([pending.id, attention!.id]))
+      expect(pendingView.scheduled.map(item => item.id)).not.toContain(made.id)
+      expect(madeView.scheduled.map(item => item.id)).toEqual([made.id])
+      expect(groupDecisionItems(madeView.scheduled).map(group => group.items.map(item => item.id))).toEqual([[made.id]])
+      expect(filterDecisionLists([], [pending], 'made', pending.id).activeFilter).toBe('all')
+      expect(filterDecisionLists([], [attention!], 'made', attention!.id).activeFilter).toBe('all')
+      expect(filterDecisionLists([], [made], 'made', made.id).activeFilter).toBe('made')
+      expect(filterDecisionLists([], [], 'made').activeFilter).toBe('all')
     })
 
     it('brings a snoozed pending decision back to the pending view at its reminder time', async () => {

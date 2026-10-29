@@ -37,6 +37,8 @@ HTTP contributions use public `connection.fetch.register()` exact routes under `
 
 The client requests allowlisted same-origin endpoints and returns through `uiWorkspace.openSession()`. Navigation validates the actual target and pending identity at click time. Runtime strings use DOM `textContent`; Inbox paints use dedicated opaque light/dark surfaces.
 
+The decision view subscribes to the Host session list so a later session-title event replaces the working-directory basename placeholder in the entry and group header. Decisions group by root session, with subagent sessions nested by delegation depth and items ordered chronologically within each session. All is the complete default; an answered decision leaves Pending but remains in All. Made selects unreviewed made decisions, while Reviewed and Disputed select their corresponding states. The same filters and grouping apply to scheduled decisions. Attention items remain visible in All and Pending, including scheduled attention, and mixed attention and decision groups preserve inbox priority order. A selected notification target remains visible even when another filter was active.
+
 Host self-checks read mounted in-process WebServer facts. They establish service availability inside the process, with external reachability outside that observation scope.
 
 ## Delivery and local state

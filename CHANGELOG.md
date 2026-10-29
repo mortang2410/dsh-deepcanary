@@ -3,8 +3,10 @@
 ## Unreleased: pending decisions
 
 - Add `deepcanary_request_decision`. An agent uses it to put a decision to you and gets its id back at once, so its turn continues. The decision shows one sentence, its explanation, the alternatives, the blast radius, its options and the session it belongs to. It accepts up to five options of at most 120 characters each, and refuses a sixth option or a longer label rather than cutting it.
-- Add `deepcanary_cancel_decision`. The session that asked can withdraw a pending decision, and a cancelled decision leaves the pending view.
+- Add `deepcanary_cancel_decision`. The asking session can withdraw a pending decision. Answered and cancelled decisions leave Pending; answered entries remain in All.
 - Pending decisions are labeled Pending decision in the Inbox, name their session, and keep their options across a restart. They have no Acknowledge action and never expire. Snooze and reminders use the existing machinery.
+- Group pending and made decisions under their root session, nesting subagent sessions by delegation depth. Headers use the current session title and working directory, falling back to the directory basename until a title arrives; entries are chronological within each session.
+- Add Pending, Made, Reviewed and Disputed filters with All as the complete default. Made selects unreviewed made decisions. Filters and session grouping also apply to scheduled decisions; scheduled attention remains in All and Pending, and mixed attention and decision groups retain inbox priority order. Opening the panel from a notification reveals its target even when another filter was active.
 
 ## 0.1.6-rc.4 — readable settings actions across themes
 
