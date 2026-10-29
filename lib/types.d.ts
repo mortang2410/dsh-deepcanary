@@ -113,6 +113,14 @@ export interface DecisionRecord {
     answerAt?: string;
     deliveryToken?: string;
     deliveryState?: 'queued' | 'delivered';
+    /** Persisted in-flight generation; the delivery token changes when a generation is resent. */
+    deliveryClaim?: string;
+    /** Bounded count of attempted delivery generations. */
+    deliveryAttempts?: number;
+    /** At most one recovery resend after an interrupted claimed delivery. */
+    deliveryRecoveries?: number;
+    /** True only after the host catalog confirms the delivery target no longer exists. */
+    sessionUnavailable?: boolean;
     deliveredAt?: string;
 }
 export interface InboxItem extends AttentionVerdict {

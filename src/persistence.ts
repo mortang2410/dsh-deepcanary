@@ -407,6 +407,10 @@ function isDecisionRecord(value: unknown): value is DecisionRecord {
     && (record.answerAt === undefined || (typeof record.answerAt === 'string' && record.answerAt.length <= 64))
     && (record.deliveryToken === undefined || isSafeOpaqueId(record.deliveryToken))
     && (record.deliveryState === undefined || record.deliveryState === 'queued' || record.deliveryState === 'delivered')
+    && (record.deliveryClaim === undefined || isSafeOpaqueId(record.deliveryClaim))
+    && (record.deliveryAttempts === undefined || (Number.isSafeInteger(record.deliveryAttempts) && record.deliveryAttempts >= 0 && record.deliveryAttempts <= 1000))
+    && (record.deliveryRecoveries === undefined || record.deliveryRecoveries === 0 || record.deliveryRecoveries === 1)
+    && (record.sessionUnavailable === undefined || typeof record.sessionUnavailable === 'boolean')
     && (record.deliveredAt === undefined || (typeof record.deliveredAt === 'string' && record.deliveredAt.length <= 64))
 }
 

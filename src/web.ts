@@ -104,6 +104,13 @@ export function installWebRoutes(ctx: unknown, service: DeepCanaryService): void
         return json(400, { error: error instanceof Error ? error.message : 'Answer could not be saved', schemaVersion: ATTENTION_PROTOCOL_VERSION })
       }
     })
+    register('decision/delete', ['POST'], async request => {
+      const payload = await body(request)
+      if (Object.keys(payload).some(key => key !== 'id') || typeof payload.id !== 'string') throw new InvalidBody(400)
+      const deleted = await service.deleteUnavailableDecision(payload.id)
+      return deleted ? json(200, { deleted: true }, { etag: etagFor(service.status().revision) })
+        : json(404, { error: 'No unavailable decision with that id', schemaVersion: ATTENTION_PROTOCOL_VERSION })
+    })
     register('explain', ['GET'], async request => {
       const result = service.explain(new URL(request.url).searchParams.get('id') ?? '')
       return result === undefined ? json(404, { found: false, schemaVersion: ATTENTION_PROTOCOL_VERSION }) : json(200, result)

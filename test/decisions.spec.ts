@@ -190,6 +190,103 @@ describe('decisions', () => {
       await expect(restarted.service.answerDecision(requested.id, 'Again')).rejects.toThrow(/already been answered/)
     })
 
+    it('queues for a retained offline session and refuses when catalog availability is unknown', async () => {
+      const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-catalog-'))
+      directories.push(directory)
+      const session = { id: 'top', header: { cwd } }
+      let live = true
+      let catalogReady = true
+      const host = { logger: {}, sessions: { get: () => live ? session : undefined },
+        sessionPersistence: { stat: async () => { if (!catalogReady) throw new Error('catalog unavailable'); return { header: { id: 'top' } } } } }
+      const service = new DeepCanaryService(host as never, { stateDir: directory })
+      services.push(service)
+      await service.ready
+      const first = await service.requestDecision('top', { ...valid, options })
+      const second = await service.requestDecision('top', { ...valid, sentence: 'Another question.', options })
+      live = false
+      expect((await service.answerDecision(first.id, 'Wait')).decision?.deliveryState).toBe('queued')
+      catalogReady = false
+      await expect(service.answerDecision(second.id, 'Wait')).rejects.toThrow(/could not be verified/)
+      expect(service.decisionsFor('top').find(item => item.id === second.id)?.decision?.answer).toBeUndefined()
+      expect(await service.deleteUnavailableDecision(second.id)).toBe(false)
+    })
+
+    it('refuses an answer for a deleted target, retains its marker, and deletes only on request', async () => {
+      const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-missing-target-'))
+      directories.push(directory)
+      const session = { id: 'top', header: { cwd } }
+      let live = true
+      const host = { logger: {}, sessions: { get: () => live ? session : undefined }, sessionPersistence: { stat: async () => undefined } }
+      const service = new DeepCanaryService(host as never, { stateDir: directory })
+      services.push(service)
+      await service.ready
+      const requested = await service.requestDecision('top', { ...valid, options })
+      live = false
+      await expect(service.answerDecision(requested.id, 'Keep the store')).rejects.toThrow(/unavailable/i)
+      expect(service.decisionsFor('top')[0]).toMatchObject({ id: requested.id, decision: { sentence: valid.sentence, sessionUnavailable: true } })
+      await service.dispose()
+      const restarted = new DeepCanaryService(host as never, { stateDir: directory })
+      services.push(restarted)
+      await restarted.ready
+      expect(restarted.decisionsFor('top')[0]?.decision?.sessionUnavailable).toBe(true)
+      expect(await restarted.deleteUnavailableDecision(requested.id)).toBe(true)
+      expect(restarted.decisionsFor('top')).toEqual([])
+    })
+
+    it('delivers a queued answer once when the target session is announced', async () => {
+      const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-queued-start-'))
+      directories.push(directory)
+      const listeners = new Map<string, (...args: unknown[]) => void>()
+      const session = { id: 'top', header: { cwd }, snapshotEvents: () => [] }
+      let agent: { session: typeof session; followup: (message: unknown) => void } | undefined
+      let signalSent!: () => void
+      const sent = new Promise<void>(resolve => { signalSent = resolve })
+      const followup = vi.fn(() => { signalSent() })
+      const host = {
+        logger: {}, on: (event: string, listener: (...args: unknown[]) => void) => { listeners.set(event, listener) },
+        sessions: { get: () => session, list: () => [], flush: async () => true },
+        agents: { get: () => agent },
+      }
+      const service = new DeepCanaryService(host as never, { stateDir: directory })
+      services.push(service)
+      await service.ready
+      service.start()
+      await service.adapter.start()
+      const requested = await service.requestDecision('top', { ...valid, options })
+      expect((await service.answerDecision(requested.id, 'Keep the store')).decision?.deliveryState).toBe('queued')
+      agent = { session, followup }
+      listeners.get('session/created')?.(session)
+      await sent
+      expect(followup).toHaveBeenCalledTimes(1)
+      expect(service.decisionsFor('top')[0]?.decision?.deliveryState).toBe('queued')
+    })
+
+    it('flushes a queued answer during startup reconciliation for an already live target', async () => {
+      const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-startup-reconcile-'))
+      directories.push(directory)
+      const session = { id: 'top', header: { cwd }, snapshotEvents: () => [] }
+      let live = false
+      let signalSent!: () => void
+      const sent = new Promise<void>(resolve => { signalSent = resolve })
+      const followup = vi.fn(() => { signalSent() })
+      const host = { logger: {}, sessions: { get: () => session, list: () => live ? [session] : [], flush: async () => true },
+        agents: { get: () => live ? { session, followup } : undefined } }
+      const first = new DeepCanaryService(host as never, { stateDir: directory })
+      services.push(first)
+      await first.ready
+      const requested = await first.requestDecision('top', { ...valid, options })
+      await first.answerDecision(requested.id, 'Keep the store')
+      await first.dispose()
+      live = true
+      const restarted = new DeepCanaryService(host as never, { stateDir: directory })
+      services.push(restarted)
+      await restarted.ready
+      restarted.start()
+      await restarted.adapter.start()
+      await sent
+      expect(followup).toHaveBeenCalledTimes(1)
+    })
+
     it('skips an in-flight delivery and releases its claim when the send fails', async () => {
       const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-decision-claim-'))
       directories.push(directory)
@@ -208,13 +305,196 @@ describe('decisions', () => {
       await started
       const seam = service as unknown as { items: InboxItem[]; flushPendingDelivery(item: InboxItem): Promise<void> }
       const item = seam.items.find(candidate => candidate.id === requested.id)!
+      const persisted = (await service.store.loadState()).items.find(candidate => candidate.id === requested.id)?.decision
+      expect(persisted?.deliveryClaim).toEqual(expect.any(String))
+      expect(persisted?.deliveryAttempts).toBe(1)
       await seam.flushPendingDelivery(item)
       expect(followup).toHaveBeenCalledTimes(1)
       rejectSend(new Error('send failed'))
       expect((await answer).decision?.deliveryState).toBe('queued')
+      expect((await service.store.loadState()).items.find(candidate => candidate.id === requested.id)?.decision?.deliveryClaim).toBeUndefined()
       await seam.flushPendingDelivery(item)
       expect(followup).toHaveBeenCalledTimes(2)
+      expect((await service.store.loadState()).items.find(candidate => candidate.id === requested.id)?.decision?.deliveryClaim).not.toBe(persisted?.deliveryClaim)
       expect(service.decisionsFor('top')[0]?.decision?.deliveryState).toBe('queued')
+    })
+
+    it('keeps the claim when a queued follow-up has an uncertain flush', async () => {
+      const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-uncertain-flush-'))
+      directories.push(directory)
+      const session = { id: 'top', header: { cwd } }
+      const followup = vi.fn()
+      const host = { logger: {}, sessions: { get: () => session, flush: async () => { throw new Error('flush failed') } },
+        agents: { get: () => ({ session, followup }) } }
+      const service = new DeepCanaryService(host as never, { stateDir: directory })
+      services.push(service)
+      await service.ready
+      const requested = await service.requestDecision('top', { ...valid, options })
+      expect((await service.answerDecision(requested.id, 'Keep the store')).decision?.deliveryState).toBe('queued')
+      const seam = service as unknown as { items: InboxItem[]; flushPendingDelivery(item: InboxItem): Promise<void> }
+      await seam.flushPendingDelivery(seam.items.find(item => item.id === requested.id)!)
+      expect(followup).toHaveBeenCalledTimes(1)
+    })
+
+    it('keeps the claim when followup throws after placing the message in the inbox', async () => {
+      const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-uncertain-send-'))
+      directories.push(directory)
+      const session = { id: 'top', header: { cwd } }
+      const pending: unknown[] = []
+      const followup = vi.fn((message: unknown) => { pending.push(message); throw new Error('wake failed') })
+      const host = { logger: {}, sessions: { get: () => session, flush: async () => true },
+        agents: { get: () => ({ session, inbox: { nextTurn: pending }, followup }) } }
+      const service = new DeepCanaryService(host as never, { stateDir: directory })
+      services.push(service)
+      await service.ready
+      const requested = await service.requestDecision('top', { ...valid, options })
+      expect((await service.answerDecision(requested.id, 'Keep the store')).decision?.deliveryState).toBe('queued')
+      const seam = service as unknown as { items: InboxItem[]; flushPendingDelivery(item: InboxItem): Promise<void> }
+      await seam.flushPendingDelivery(seam.items.find(item => item.id === requested.id)!)
+      expect(followup).toHaveBeenCalledTimes(1)
+    })
+
+    it('checks a persisted claim against the resumed stream before resending', async () => {
+      const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-claim-restart-'))
+      directories.push(directory)
+      const sent: Array<{ content: Array<{ text: string }> }> = []
+      let events: unknown[] = []
+      const session = { id: 'top', header: { cwd }, snapshotEvents: () => events }
+      const host = {
+        logger: {}, sessions: { get: () => session, flush: async () => true },
+        agents: { get: () => ({ session, inbox: { nextTurn: [] }, followup: (message: typeof sent[number]) => { sent.push(message) } }) },
+      }
+      const first = new DeepCanaryService(host as never, { stateDir: directory })
+      services.push(first)
+      await first.ready
+      const requested = await first.requestDecision('top', { ...valid, options })
+      await first.answerDecision(requested.id, 'Keep the store')
+      expect(sent).toHaveLength(1)
+      await first.dispose()
+      events = [{ type: 'user/message', data: sent[0] }]
+      const restarted = new DeepCanaryService(host as never, { stateDir: directory })
+      services.push(restarted)
+      await restarted.ready
+      const seam = restarted as unknown as { items: InboxItem[]; flushPendingDelivery(item: InboxItem): Promise<void> }
+      await seam.flushPendingDelivery(seam.items.find(item => item.id === requested.id)!)
+      expect(sent).toHaveLength(1)
+      expect(restarted.decisionsFor('top')[0]?.decision?.deliveryState).toBe('delivered')
+    })
+
+    it('does not resend a follow-up that is still in the resumed agent inbox', async () => {
+      const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-pending-followup-'))
+      directories.push(directory)
+      const sent: unknown[] = []
+      const pending: unknown[] = []
+      const session = { id: 'top', header: { cwd }, snapshotEvents: () => [] }
+      const host = { logger: {}, sessions: { get: () => session, flush: async () => true },
+        agents: { get: () => ({ session, inbox: { nextTurn: pending }, followup: (message: unknown) => { sent.push(message); pending.push(message) } }) } }
+      const first = new DeepCanaryService(host as never, { stateDir: directory })
+      services.push(first)
+      await first.ready
+      const requested = await first.requestDecision('top', { ...valid, options })
+      await first.answerDecision(requested.id, 'Keep the store')
+      await first.dispose()
+      const restarted = new DeepCanaryService(host as never, { stateDir: directory })
+      services.push(restarted)
+      await restarted.ready
+      const seam = restarted as unknown as { items: InboxItem[]; flushPendingDelivery(item: InboxItem): Promise<void> }
+      const item = seam.items.find(candidate => candidate.id === requested.id)!
+      await seam.flushPendingDelivery(item)
+      expect(sent).toHaveLength(1)
+      expect(restarted.decisionsFor('top')[0]?.decision?.deliveryState).toBe('queued')
+      pending.splice(0)
+      await seam.flushPendingDelivery(item)
+      expect(sent).toHaveLength(2)
+    })
+
+    it('recovers once after a crash before the recovery send starts', async () => {
+      const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-recovery-before-send-'))
+      directories.push(directory)
+      const sent: Array<{ content: Array<{ text: string }> }> = []
+      const session = { id: 'top', header: { cwd }, snapshotEvents: () => [] }
+      const host = { logger: {}, sessions: { get: () => session, flush: async () => true },
+        agents: { get: () => ({ session, inbox: { nextTurn: [] }, followup: (message: typeof sent[number]) => { sent.push(message) } }) } }
+      const first = new DeepCanaryService(host as never, { stateDir: directory })
+      services.push(first)
+      await first.ready
+      const requested = await first.requestDecision('top', { ...valid, options })
+      await first.answerDecision(requested.id, 'Keep the store')
+      await first.dispose()
+
+      const second = new DeepCanaryService(host as never, { stateDir: directory })
+      services.push(second)
+      await second.ready
+      let entered!: () => void
+      let release!: () => void
+      const sendStarted = new Promise<void>(resolve => { entered = resolve })
+      const paused = new Promise<void>(resolve => { release = resolve })
+      vi.spyOn(second.adapter, 'deliverDecision').mockImplementation(async () => { entered(); await paused; return false })
+      const seam = second as unknown as { items: InboxItem[]; flushPendingDelivery(item: InboxItem): Promise<void> }
+      const work = seam.flushPendingDelivery(seam.items.find(item => item.id === requested.id)!)
+      await sendStarted
+      const interrupted = await second.store.loadState()
+      release()
+      await work
+      await second.dispose()
+      const claim = interrupted.items.find(item => item.id === requested.id)?.decision
+      expect(claim?.deliveryClaim).toEqual(expect.any(String))
+      expect(claim?.deliveryRecoveries ?? 0).toBe(0)
+      await second.store.save(interrupted.items, interrupted.backgroundWatches, interrupted.runtime)
+
+      const third = new DeepCanaryService(host as never, { stateDir: directory })
+      services.push(third)
+      await third.ready
+      const thirdSeam = third as unknown as { items: InboxItem[]; flushPendingDelivery(item: InboxItem): Promise<void> }
+      const item = thirdSeam.items.find(candidate => candidate.id === requested.id)!
+      await thirdSeam.flushPendingDelivery(item)
+      await thirdSeam.flushPendingDelivery(item)
+      expect(sent).toHaveLength(2)
+      expect(sent[1]!.content[0]!.text).not.toBe(sent[0]!.content[0]!.text)
+    })
+
+    it('resends an absent token once and ignores observations from the old generation', async () => {
+      const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-generation-restart-'))
+      directories.push(directory)
+      const listeners = new Map<string, (...args: unknown[]) => void>()
+      const sent: Array<{ role: string; source: { kind: string }; content: Array<{ text: string }> }> = []
+      const session = { id: 'top', header: { cwd }, snapshotEvents: () => [] }
+      const host = {
+        logger: {}, on: (event: string, listener: (...args: unknown[]) => void) => { listeners.set(event, listener) },
+        sessions: { get: () => session, flush: async () => true },
+        agents: { get: () => ({ session, inbox: { nextTurn: [] }, followup: (message: typeof sent[number]) => { sent.push(message) } }) },
+      }
+      const first = new DeepCanaryService(host as never, { stateDir: directory })
+      services.push(first)
+      await first.ready
+      const requested = await first.requestDecision('top', { ...valid, options })
+      await first.answerDecision(requested.id, 'Keep the store')
+      const firstSeam = first as unknown as { items: InboxItem[]; flushPendingDelivery(item: InboxItem): Promise<void> }
+      await firstSeam.flushPendingDelivery(firstSeam.items.find(item => item.id === requested.id)!)
+      expect(sent).toHaveLength(1)
+      await first.dispose()
+      const second = new DeepCanaryService(host as never, { stateDir: directory })
+      services.push(second)
+      await second.ready
+      second.start()
+      await second.adapter.start()
+      const secondSeam = second as unknown as { items: InboxItem[]; flushPendingDelivery(item: InboxItem): Promise<void> }
+      await secondSeam.flushPendingDelivery(secondSeam.items.find(item => item.id === requested.id)!)
+      expect(sent).toHaveLength(2)
+      expect(sent[0]!.content[0]!.text).not.toEqual(sent[1]!.content[0]!.text)
+      listeners.get('session/event')?.(session, { type: 'user/message', data: sent[0] })
+      expect(second.decisionsFor('top')[0]?.decision?.deliveryState).toBe('queued')
+      await second.dispose()
+      const third = new DeepCanaryService(host as never, { stateDir: directory })
+      services.push(third)
+      await third.ready
+      third.start()
+      await third.adapter.start()
+      const thirdSeam = third as unknown as { items: InboxItem[]; flushPendingDelivery(item: InboxItem): Promise<void> }
+      await thirdSeam.flushPendingDelivery(thirdSeam.items.find(item => item.id === requested.id)!)
+      expect(sent).toHaveLength(2)
+      listeners.get('session/event')?.(session, { type: 'user/message', data: sent[1] })
+      expect(third.decisionsFor('top')[0]?.decision?.deliveryState).toBe('delivered')
     })
 
     it('observes only a token-bearing user message on the routed parent and preserves queued on failure', async () => {

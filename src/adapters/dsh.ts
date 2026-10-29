@@ -10,6 +10,11 @@ export interface Disposable {
   dispose(): void
 }
 
+/** The follow-up may have been accepted despite a send or checkpoint failure. */
+export class DecisionDeliveryUncertainError extends Error {
+  constructor(cause: unknown) { super('Decision follow-up may have been accepted without a confirmed checkpoint', { cause }) }
+}
+
 export interface DeepCanaryEvent {
   type: 'session/created' | 'session/event' | 'session/disposed'
   session: unknown
@@ -69,7 +74,8 @@ interface ContextLike {
   sessions?: SessionStoreLike
   get?: (name: string) => unknown
   sessionProjections?: unknown
-  agents?: { get?: (id: string) => { session: unknown; followup: (message: unknown) => unknown } | undefined }
+  agents?: { get?: (id: string) => { session: unknown; followup: (message: unknown) => unknown; inbox?: { nextTurn?: readonly unknown[] } } | undefined }
+  sessionPersistence?: { stat: (id: string) => Promise<unknown> }
   inject?: (services: string[], callback: (ctx: ContextLike) => unknown) => unknown
 }
 
@@ -109,6 +115,7 @@ export class ContextDshAdapter implements DshAdapter {
   private readonly ctx: ContextLike
   private readonly listeners = new Set<(event: DeepCanaryEvent) => void>()
   private agents: ContextLike['agents']
+  private sessionPersistence: ContextLike['sessionPersistence']
   private readonly snapshots = new Map<string, SessionSnapshot>()
   private readonly runtimeHealth: () => Promise<RuntimeHealth>
   private readonly sessionStore: SessionStoreLike | undefined
@@ -133,11 +140,19 @@ export class ContextDshAdapter implements DshAdapter {
 
   constructor(ctx: Context, options: DshAdapterOptions = {}) {
     this.ctx = ctx as unknown as ContextLike
-    if (this.ctx.inject === undefined) this.agents = this.ctx.agents
-    else this.ctx.inject(['agents'], agentCtx => {
-      this.agents = agentCtx.agents
-      return () => { this.agents = undefined }
-    })
+    if (this.ctx.inject === undefined) {
+      this.agents = this.ctx.agents
+      this.sessionPersistence = this.ctx.sessionPersistence
+    } else {
+      this.ctx.inject(['agents'], agentCtx => {
+        this.agents = agentCtx.agents
+        return () => { this.agents = undefined }
+      })
+      this.ctx.inject(['sessionPersistence'], persistenceCtx => {
+        this.sessionPersistence = persistenceCtx.sessionPersistence
+        return () => { this.sessionPersistence = undefined }
+      })
+    }
     this.hostVersion = options.hostVersion ?? process.env.DSH_VERSION ?? 'unknown'
     this.sessionStore = options.sessionStore ?? this.ctx.sessions ?? (this.ctx.get?.('sessions') as SessionStoreLike | undefined)
     this.runtimeHealth = options.runtimeHealth ?? (async () => ({
@@ -190,6 +205,36 @@ export class ContextDshAdapter implements DshAdapter {
     return this.snapshots.get(sessionId) ?? null
   }
 
+  hasLiveAgent(sessionId: string): boolean {
+    return this.agents?.get?.(sessionId) !== undefined
+  }
+
+  /** Distinguish absent stored sessions from temporarily unavailable catalog access. */
+  async sessionExists(sessionId: string): Promise<boolean | undefined> {
+    if (this.hasLiveAgent(sessionId) || this.sessionStore?.get?.(sessionId) !== undefined) return true
+    if (this.sessionPersistence === undefined) return undefined
+    try {
+      const stored = await this.sessionPersistence.stat(sessionId)
+      return stored !== undefined || this.hasLiveAgent(sessionId) || this.sessionStore?.get?.(sessionId) !== undefined
+    } catch { return undefined }
+  }
+
+  /** A resumed live session exposes its complete event stream before announcement. */
+  sessionEvents(sessionId: string): readonly unknown[] | undefined {
+    const session = this.sessionStore?.get?.(sessionId)
+    if (!isRecord(session) || typeof session.snapshotEvents !== 'function') return undefined
+    try {
+      const events: unknown = session.snapshotEvents()
+      return Array.isArray(events) ? events : undefined
+    } catch { return undefined }
+  }
+
+  /** Pending follow-ups may already be durable without a user/message event. */
+  pendingFollowups(sessionId: string): readonly unknown[] | undefined {
+    const pending = this.agents?.get?.(sessionId)?.inbox?.nextTurn
+    return Array.isArray(pending) ? pending : undefined
+  }
+
   /** Queue an ordinary user turn on a live agent and flush the session checkpoint. */
   async deliverDecision(sessionId: string, text: string): Promise<boolean> {
     const agent = this.agents?.get?.(sessionId)
@@ -197,8 +242,11 @@ export class ContextDshAdapter implements DshAdapter {
     if (typeof this.sessionStore?.flush !== 'function') throw new Error('Session flush is unavailable')
     const content = Object.freeze([Object.freeze({ type: 'text', text })])
     const message = Object.freeze({ id: randomUUID(), role: 'user', content, source: Object.freeze({ kind: 'user' }) })
-    await agent.followup(message)
-    await this.sessionStore.flush(agent.session)
+    try { await agent.followup(message) } catch (error) {
+      if (agent.inbox?.nextTurn?.some(value => isRecord(value) && value.id === message.id)) throw new DecisionDeliveryUncertainError(error)
+      throw error
+    }
+    try { await this.sessionStore.flush(agent.session) } catch (error) { throw new DecisionDeliveryUncertainError(error) }
     return true
   }
 

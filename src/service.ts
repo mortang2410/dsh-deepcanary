@@ -13,7 +13,7 @@ import { normalizeConfig, sanitizeConfigPatch } from './config.js'
 import { resolveStateIdentity, claimStateDirectory, importLegacyInbox } from './state-identity.js'
 import { importLegacySettings } from './settings-migration.js'
 import type { DeepCanaryConfigInput, DeepCanaryRuntimeConfig } from './config.js'
-import { ContextDshAdapter } from './adapters/dsh.js'
+import { ContextDshAdapter, DecisionDeliveryUncertainError } from './adapters/dsh.js'
 import { BackgroundJobTracker, countRunningBackgroundJobs, selectBackgroundEvent, signalFromBackgroundSettlement } from './adapters/background-jobs.js'
 import type { BackgroundSettlement } from './adapters/background-jobs.js'
 import type { Disposable, SessionSnapshot } from './adapters/dsh.js'
@@ -213,6 +213,8 @@ export class DeepCanaryService {
   private readonly sessions = new Map<string, LiveSession>()
   private readonly items: InboxItem[] = []
   private readonly decisionDeliveries = new Set<string>()
+  private readonly pendingDecisionWork = new Set<Promise<void>>()
+  private readonly restoredDecisionDeliveries = new Set<string>()
   private readonly suppressedReasons = new Set<SuppressibleReasonCode>()
   private readonly dedupe: DedupeLedger
   private readonly budget: InterruptBudget
@@ -273,11 +275,21 @@ export class DeepCanaryService {
     if (this.started || this.disposed) return
     this.started = true
     this.adapterSubscription = this.adapter.subscribe(event => {
-      if (event.type === 'session/created') this.onSessionCreated(event.session, event.snapshot)
+      if (event.type === 'session/created') {
+        this.onSessionCreated(event.session, event.snapshot)
+        const sessionId = idOf(event.session)
+        if (sessionId !== undefined) {
+          void this.flushSessionDecisions(sessionId).catch(() => this.logger.warn?.(`${PLUGIN_NAME}: decision flush failed`))
+          this.scheduleAvailabilityRefresh(sessionId)
+        }
+      }
       else if (event.type === 'session/event') this.onSessionEvent(event.session, event.event, event.snapshot)
-      else this.onSessionDisposed(event.session)
+      else {
+        this.onSessionDisposed(event.session)
+        this.scheduleAvailabilityRefresh(idOf(event.session))
+      }
     })
-    void this.adapter.start().then(() => this.normalizeLifecycle(Date.now())).catch(() => {
+    void this.adapter.start().then(() => { this.normalizeLifecycle(Date.now()); this.scheduleAvailabilityRefresh() }).catch(() => {
       this.disposed = true
       this.logger.error?.(`${PLUGIN_NAME}: initialization failed; state access refused`)
       this.adapterSubscription?.dispose()
@@ -687,15 +699,23 @@ export class DeepCanaryService {
     if (item === undefined || decision?.kind !== 'pending' || item.status === 'cancelled') throw new Error('No pending decision with that id')
     if (decision.answer !== undefined) throw new Error('This decision has already been answered')
     const answer = boundedDecisionText('answer', input, true)
+    await this.requireDecisionTarget(item)
+    if (this.disposed) throw new Error('DeepCanary is shutting down; nothing was answered')
+    if (this.find(id) !== item || this.find(id)?.status === 'cancelled') throw new Error('No pending decision with that id')
+    if (decision.answer !== undefined) throw new Error('This decision has already been answered')
     decision.answer = answer
     decision.answerAt = nowIso()
     decision.deliveryToken = randomUUID()
     decision.deliveryState = 'queued'
+    decision.deliveryAttempts = 0
+    decision.deliveryRecoveries = 0
     this.bumpRevision()
     if (!await this.queueSave()) {
       delete decision.answer
       delete decision.answerAt
       delete decision.deliveryToken
+      delete decision.deliveryAttempts
+      delete decision.deliveryRecoveries
       this.bumpRevision()
       throw new Error('The answer could not be saved; nothing was delivered')
     }
@@ -703,35 +723,171 @@ export class DeepCanaryService {
     return this.toPublic(item)
   }
 
-  /** Attempt once now; ticket 04b can extend this seam to flush on session start. */
-  private async flushPendingDelivery(item: InboxItem): Promise<void> {
+  private async requireDecisionTarget(item: InboxItem): Promise<void> {
+    const decision = item.decision!
+    const target = decision.parentSessionId ?? item.sessionId
+    const exists = target === undefined ? false : await this.adapter.sessionExists(target)
+    if (exists === undefined && decision.sessionUnavailable !== true) {
+      throw new Error('The target session availability could not be verified; no response was recorded')
+    }
+    if (exists === false || (exists === undefined && decision.sessionUnavailable === true)) {
+      if (!decision.sessionUnavailable) {
+        decision.sessionUnavailable = true
+        this.bumpRevision()
+        if (!await this.queueSave()) {
+          delete decision.sessionUnavailable
+          this.bumpRevision()
+          throw new Error('The unavailable-session marker could not be saved; no response was recorded')
+        }
+      }
+      throw new Error('The target session is unavailable; no response was recorded')
+    }
+    if (exists === true) delete decision.sessionUnavailable
+  }
+
+  /** Delete only an explicitly unavailable decision, after the user requests it. */
+  async deleteUnavailableDecision(id: string): Promise<boolean> {
+    await this.ready
+    const index = this.items.findIndex(item => item.id === id && item.decision?.sessionUnavailable === true)
+    if (index < 0) return false
+    const [item] = this.items.splice(index, 1)
+    this.bumpRevision()
+    if (!await this.queueSave()) {
+      this.items.splice(index, 0, item!)
+      this.bumpRevision()
+      throw new Error('The decision could not be deleted')
+    }
+    this.restoredDecisionDeliveries.delete(id)
+    this.syncSupervisor()
+    return true
+  }
+
+  private scheduleAvailabilityRefresh(sessionId?: string): void {
+    void this.refreshDecisionAvailability(sessionId).catch(() => this.logger.warn?.(`${PLUGIN_NAME}: decision availability check failed`))
+  }
+
+  private async refreshDecisionAvailability(sessionId?: string): Promise<void> {
+    await this.ready
+    if (this.disposed) return
+    let changed = false
+    for (const item of this.items) {
+      const decision = item.decision
+      const target = decision?.parentSessionId ?? item.sessionId
+      if (decision === undefined || target === undefined || (sessionId !== undefined && target !== sessionId)) continue
+      const exists = await this.adapter.sessionExists(target)
+      if (this.disposed) return
+      if (!this.items.includes(item) || exists === undefined) continue
+      if (!exists && decision.sessionUnavailable !== true) { decision.sessionUnavailable = true; changed = true }
+      else if (exists && decision.sessionUnavailable === true) { delete decision.sessionUnavailable; changed = true }
+    }
+    if (changed) { this.bumpRevision(); await this.queueSave() }
+  }
+
+  private async flushSessionDecisions(sessionId: string): Promise<void> {
+    await this.ready
+    if (this.disposed) return
+    for (const item of this.items) {
+      if ((item.decision?.parentSessionId ?? item.sessionId) === sessionId) await this.flushPendingDelivery(item)
+    }
+  }
+
+  /** Track active delivery so disposal drains it before a replacement starts. */
+  private flushPendingDelivery(item: InboxItem): Promise<void> {
+    if (this.disposed) return Promise.resolve()
+    const work = this.performDecisionDelivery(item)
+    this.pendingDecisionWork.add(work)
+    void work.then(() => this.pendingDecisionWork.delete(work), () => this.pendingDecisionWork.delete(work))
+    return work
+  }
+
+  /** Persist a generation before sending; a restored generation is checked before any resend. */
+  private async performDecisionDelivery(item: InboxItem): Promise<void> {
     const decision = item.decision
     const target = decision?.parentSessionId ?? item.sessionId
-    if (decision?.answer === undefined || decision.deliveryToken === undefined || decision.deliveryState !== 'queued' || target === undefined || this.decisionDeliveries.has(item.id)) return
+    if (decision?.answer === undefined || decision.deliveryToken === undefined || decision.deliveryState !== 'queued'
+      || target === undefined || this.decisionDeliveries.has(item.id) || !this.adapter.hasLiveAgent(target)) return
     this.decisionDeliveries.add(item.id)
     try {
-      const text = `The user answered a decision.\nDecision id: ${item.id}\nQuestion: ${decision.sentence}\nAnswer: ${decision.answer}\nDelivery token: ${decision.deliveryToken}\nTreat the decision id as an idempotency key.`
-      await this.adapter.deliverDecision(target, text)
-    } catch (error) {
-      this.logger.warn?.(`${PLUGIN_NAME}: decision delivery failed; the answer remains queued`, error)
+      const recovering = this.restoredDecisionDeliveries.has(item.id)
+      if (decision.deliveryClaim !== undefined && !recovering) return
+      if (recovering) {
+        const events = this.adapter.sessionEvents(target)
+        if (events === undefined) return
+        if (events.some(event => {
+          const record = asRecord(event)
+          return record.type === 'user/message' && this.deliveryMessageHasToken(record.data, decision.deliveryToken!)
+        })) {
+          this.markDecisionDelivered(decision)
+          this.restoredDecisionDeliveries.delete(item.id)
+          await this.queueSave()
+          return
+        }
+        const pending = this.adapter.pendingFollowups(target)
+        if (pending === undefined || pending.some(message => this.deliveryMessageHasToken(message, decision.deliveryToken!))) return
+        if ((decision.deliveryRecoveries ?? 0) >= 1) return
+      }
+      const previous = { token: decision.deliveryToken, claim: decision.deliveryClaim,
+        attempts: decision.deliveryAttempts, recoveries: decision.deliveryRecoveries }
+      const claim = randomUUID()
+      if (recovering || (decision.deliveryAttempts ?? 0) > 0) decision.deliveryToken = randomUUID()
+      decision.deliveryClaim = claim
+      decision.deliveryAttempts = Math.min(1000, (decision.deliveryAttempts ?? 0) + 1)
+      this.bumpRevision()
+      if (!await this.queueSave()) {
+        decision.deliveryToken = previous.token
+        if (previous.claim === undefined) delete decision.deliveryClaim
+        else decision.deliveryClaim = previous.claim
+        if (previous.attempts === undefined) delete decision.deliveryAttempts
+        else decision.deliveryAttempts = previous.attempts
+        if (previous.recoveries === undefined) delete decision.deliveryRecoveries
+        else decision.deliveryRecoveries = previous.recoveries
+        this.bumpRevision()
+        return
+      }
+      this.restoredDecisionDeliveries.delete(item.id)
+      try {
+        const text = `The user answered a decision.\nDecision id: ${item.id}\nQuestion: ${decision.sentence}\nAnswer: ${decision.answer}\nDelivery token: ${decision.deliveryToken}\nTreat the decision id as an idempotency key.`
+        if (!await this.adapter.deliverDecision(target, text)) throw new Error('The target agent is not live')
+        if (recovering && decision.deliveryClaim === claim) {
+          decision.deliveryRecoveries = 1
+          this.bumpRevision()
+          await this.queueSave()
+        }
+      } catch (error) {
+        if (!(error instanceof DecisionDeliveryUncertainError) && decision.deliveryClaim === claim && decision.deliveryState === 'queued') {
+          delete decision.deliveryClaim
+          this.bumpRevision()
+          await this.queueSave()
+        }
+        this.logger.warn?.(`${PLUGIN_NAME}: decision delivery failed; the answer remains queued`, error)
+      }
     } finally {
       this.decisionDeliveries.delete(item.id)
     }
   }
 
-  private observeDecisionDelivery(sessionId: string, value: unknown): void {
+  private deliveryMessageHasToken(value: unknown, token: string): boolean {
     const message = asRecord(value)
-    if (message.role !== 'user' || asRecord(message.source).kind !== 'user' || !Array.isArray(message.content)) return
+    return message.role === 'user' && asRecord(message.source).kind === 'user' && Array.isArray(message.content)
+      && message.content.some(block => {
+        const part = asRecord(block)
+        return part.type === 'text' && typeof part.text === 'string' && part.text.includes(token)
+      })
+  }
+
+  private markDecisionDelivered(decision: DecisionRecord): void {
+    decision.deliveryState = 'delivered'
+    decision.deliveredAt = nowIso()
+    this.bumpRevision()
+  }
+
+  private observeDecisionDelivery(sessionId: string, value: unknown): void {
     for (const item of this.items) {
       const decision = item.decision
-      if (decision?.answer === undefined || decision.deliveryState !== 'queued' || decision.deliveryToken === undefined || (decision.parentSessionId ?? item.sessionId) !== sessionId) continue
-      if (!message.content.some(block => {
-        const part = asRecord(block)
-        return part.type === 'text' && typeof part.text === 'string' && part.text.includes(decision.deliveryToken!)
-      })) continue
-      decision.deliveryState = 'delivered'
-      decision.deliveredAt = nowIso()
-      this.bumpRevision()
+      if (decision?.answer === undefined || decision.deliveryState !== 'queued' || decision.deliveryToken === undefined
+        || (decision.parentSessionId ?? item.sessionId) !== sessionId || !this.deliveryMessageHasToken(value, decision.deliveryToken)) continue
+      this.markDecisionDelivered(decision)
+      this.restoredDecisionDeliveries.delete(item.id)
       void this.queueSave()
     }
   }
@@ -1393,6 +1549,7 @@ export class DeepCanaryService {
     await this.supervisorStart.catch(() => undefined)
     if (this.supervisorStarted) await this.supervisor.stop()
     await this.ready.catch(() => undefined)
+    await Promise.allSettled([...this.pendingDecisionWork])
     await this.questionChain
     await this.backgroundChain
     await this.saveChain
@@ -1413,7 +1570,13 @@ export class DeepCanaryService {
     try {
       const restored = await this.store.loadState()
       this.items.splice(0, this.items.length, ...retainInboxItems(restored.items, this.config.maxInboxItems))
-      for (const item of this.items) this.restoredAttention.add(item.id)
+      for (const item of this.items) {
+        this.restoredAttention.add(item.id)
+        if (item.decision?.answer !== undefined && item.decision.deliveryState === 'queued'
+          && (item.decision.deliveryClaim !== undefined || item.decision.deliveryAttempts === undefined)) {
+          this.restoredDecisionDeliveries.add(item.id)
+        }
+      }
       this.background.restore(restored.backgroundWatches)
       if (restored.runtime?.policyVersion === ATTENTION_POLICY_VERSION) {
         this.dedupe.restore(restored.runtime.dedupe)
@@ -2113,7 +2276,7 @@ export class DeepCanaryService {
   }
 
   private publicDecision(decision: DecisionRecord): DecisionRecord {
-    const { deliveryToken: _token, ...visible } = decision
+    const { deliveryToken: _token, deliveryClaim: _claim, deliveryAttempts: _attempts, deliveryRecoveries: _recoveries, ...visible } = decision
     return visible
   }
 

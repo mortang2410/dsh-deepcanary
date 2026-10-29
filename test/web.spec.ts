@@ -145,7 +145,8 @@ describe('DeepCanary Web contract', () => {
       expect(clientSource).toContain('satisfies Record<keyof typeof zh, string>')
       expect(injected).toHaveLength(0)
       expect(routes.has('/api/dsh-deepcanary/decision/answer')).toBe(true)
-      expect(routes.size).toBe(11)
+      expect(routes.has('/api/dsh-deepcanary/decision/delete')).toBe(true)
+      expect(routes.size).toBe(12)
       // Lifetime is scoped by the public connection registry.
       expect(disposeRoutes).toBeUndefined()
       const legacy = await fetch(`http://127.0.0.1:${port}/dsh-deepcanary/health`)

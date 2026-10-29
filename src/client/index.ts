@@ -58,7 +58,7 @@ type ClientItem = {
   taskState?: 'running' | 'waiting-human' | 'completed' | 'failed' | 'aborted' | 'disposed' | 'unknown'
   feedback?: { useful: boolean; value?: 'useful' | 'not-relevant' | 'wrong-level' | 'already-resolved'; at: string }
   /** Decision content; present only on decision items. Options are absent on made decisions. */
-  decision?: { kind: 'pending' | 'made'; sentence: string; explanation: string; options?: string[]; sessionTitle?: string; answer?: string; deliveryState?: 'queued' | 'delivered' }
+  decision?: { kind: 'pending' | 'made'; sentence: string; explanation: string; options?: string[]; sessionTitle?: string; answer?: string; deliveryState?: 'queued' | 'delivered'; sessionUnavailable?: boolean }
   bundleCount: number
 }
 
@@ -154,6 +154,7 @@ type Controller = {
   setSize: (width: number, height: number) => void
   action: (id: string, payload: Record<string, unknown>) => Promise<void>
   answerDecision: (id: string, answer: string) => Promise<void>
+  deleteDecision: (id: string) => Promise<void>
   canNotifyItem: (item: ClientItem) => boolean
   claimDelivery: (id: string, expiresAt: string, generation: number) => Promise<'granted' | 'already-claimed' | 'already-complete' | 'exhausted' | 'unavailable'>
   recordDelivery: (id: string, payload: {
@@ -321,6 +322,9 @@ const zh = {
   'item.decisionDelivered': '已送达',
   'item.decisionAnswerFailed': '回答未保存，请检查连接后重试。',
   'item.decisionAnswerLong': '回答不能超过 8000 个字符。',
+  'item.decisionUnavailable': '目标会话已不存在，无法送达。',
+  'item.decisionDelete': '删除此决定',
+  'item.decisionDeleteConfirm': '确定永久删除此决定及其内容？',
   'item.reason.unknown': '检测到需要关注的运行时事件。',
   'item.suggestion.HUMAN_APPROVAL_REQUIRED': '在 DSH 中查看待审批请求并决定是否允许。',
   'item.suggestion.HUMAN_QUESTION_PENDING': '准备好后，在 DSH 中回答待处理问题。',
@@ -557,6 +561,9 @@ const en = {
   'item.decisionDelivered': 'Delivered',
   'item.decisionAnswerFailed': 'The answer was not saved. Check the connection and try again.',
   'item.decisionAnswerLong': 'The answer cannot exceed 8000 characters.',
+  'item.decisionUnavailable': 'The target session no longer exists; delivery is unavailable.',
+  'item.decisionDelete': 'Delete this decision',
+  'item.decisionDeleteConfirm': 'Permanently delete this decision and its content?',
   'item.reason.unknown': 'A runtime event needs your attention.',
   'item.suggestion.HUMAN_APPROVAL_REQUIRED': 'Review the pending request in DSH and decide whether to allow it.',
   'item.suggestion.HUMAN_QUESTION_PENDING': 'Answer the pending question in DSH when you are ready.',
@@ -1016,11 +1023,31 @@ function createController(ctx: ClientContext): Controller {
         if (!response.ok) {
           const result = await response.json() as { error?: unknown }
           showNotice({ id, kind: 'answer-failed', tone: 'error', ...(typeof result.error === 'string' ? { text: result.error } : {}) })
+          await controller.refresh()
           return
         }
         await controller.refresh()
       } catch {
         showNotice({ id, kind: 'answer-failed', tone: 'error' })
+      } finally {
+        const finished = new Set(state.pending)
+        finished.delete(id)
+        publish({ pending: finished })
+      }
+    },
+    deleteDecision: async id => {
+      if (state.pending.has(id)) return
+      const nextPending = new Set(state.pending)
+      nextPending.add(id)
+      publish({ pending: nextPending })
+      try {
+        const response = await request('/api/dsh-deepcanary/decision/delete', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }),
+        })
+        if (!response?.ok) throw new Error('delete request failed')
+        await controller.refresh()
+      } catch {
+        showNotice({ id, kind: 'action-failed', tone: 'error' })
       } finally {
         const finished = new Set(state.pending)
         finished.delete(id)
@@ -1920,10 +1947,16 @@ function itemCard(item: ClientItem, state: ControllerState, t: Translate, contro
       children.push(createElement('p', { className: 'dsc-decision-options', key: 'decision-options' },
         translate(t, 'item.decisionOptions', { options: decision.options.join(' · ') })))
     }
+    if (decision.sessionUnavailable === true) {
+      children.push(createElement('p', { className: 'dsc-card-suggestion', key: 'decision-unavailable' }, translate(t, 'item.decisionUnavailable')))
+      children.push(actionButton(translate(t, 'item.decisionDelete'), () => {
+        if (window.confirm(translate(t, 'item.decisionDeleteConfirm'))) void controller.deleteDecision(item.id)
+      }, busy))
+    }
     if (decision.kind === 'pending') {
       children.push(createElement('p', { className: 'dsc-card-suggestion', key: 'delivery-state' },
         translate(t, decision.deliveryState === 'delivered' ? 'item.decisionDelivered' : 'item.decisionQueued')))
-      if (decision.answer === undefined) children.push(createElement('form', {
+      if (decision.answer === undefined && decision.sessionUnavailable !== true) children.push(createElement('form', {
         key: 'decision-answer',
         onSubmit: (event: FormEvent<HTMLFormElement>) => {
           event.preventDefault()

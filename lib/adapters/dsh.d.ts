@@ -5,6 +5,10 @@ import type { UserQuestionFacts } from './user-questions.js';
 export interface Disposable {
     dispose(): void;
 }
+/** The follow-up may have been accepted despite a send or checkpoint failure. */
+export declare class DecisionDeliveryUncertainError extends Error {
+    constructor(cause: unknown);
+}
 export interface DeepCanaryEvent {
     type: 'session/created' | 'session/event' | 'session/disposed';
     session: unknown;
@@ -78,6 +82,7 @@ export declare class ContextDshAdapter implements DshAdapter {
     private readonly ctx;
     private readonly listeners;
     private agents;
+    private sessionPersistence;
     private readonly snapshots;
     private readonly runtimeHealth;
     private readonly sessionStore;
@@ -96,6 +101,13 @@ export declare class ContextDshAdapter implements DshAdapter {
     getReconciliationStatus(): ReconciliationStatus;
     subscribe(listener: (event: DeepCanaryEvent) => void): Disposable;
     getSessionSnapshot(sessionId: string): Promise<SessionSnapshot | null>;
+    hasLiveAgent(sessionId: string): boolean;
+    /** Distinguish absent stored sessions from temporarily unavailable catalog access. */
+    sessionExists(sessionId: string): Promise<boolean | undefined>;
+    /** A resumed live session exposes its complete event stream before announcement. */
+    sessionEvents(sessionId: string): readonly unknown[] | undefined;
+    /** Pending follow-ups may already be durable without a user/message event. */
+    pendingFollowups(sessionId: string): readonly unknown[] | undefined;
     /** Queue an ordinary user turn on a live agent and flush the session checkpoint. */
     deliverDecision(sessionId: string, text: string): Promise<boolean>;
     /** Lineage the host recorded for a live session; undefined when the host does not know it. */

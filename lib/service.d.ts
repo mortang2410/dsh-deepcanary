@@ -29,6 +29,8 @@ export declare class DeepCanaryService {
     private readonly sessions;
     private readonly items;
     private readonly decisionDeliveries;
+    private readonly pendingDecisionWork;
+    private readonly restoredDecisionDeliveries;
     private readonly suppressedReasons;
     private readonly dedupe;
     private readonly budget;
@@ -102,8 +104,18 @@ export declare class DeepCanaryService {
     }): Promise<PublicInboxItem>;
     /** Commit one answer before attempting delivery to the owning session or its parent. */
     answerDecision(id: string, input: unknown): Promise<PublicInboxItem>;
-    /** Attempt once now; ticket 04b can extend this seam to flush on session start. */
+    private requireDecisionTarget;
+    /** Delete only an explicitly unavailable decision, after the user requests it. */
+    deleteUnavailableDecision(id: string): Promise<boolean>;
+    private scheduleAvailabilityRefresh;
+    private refreshDecisionAvailability;
+    private flushSessionDecisions;
+    /** Track active delivery so disposal drains it before a replacement starts. */
     private flushPendingDelivery;
+    /** Persist a generation before sending; a restored generation is checked before any resend. */
+    private performDecisionDelivery;
+    private deliveryMessageHasToken;
+    private markDecisionDelivered;
     private observeDecisionDelivery;
     /** Withdraw a pending decision. Only the session that asked may cancel it, and only while it is pending. */
     cancelDecision(ownerSessionId: string, id: string): PublicInboxItem;
