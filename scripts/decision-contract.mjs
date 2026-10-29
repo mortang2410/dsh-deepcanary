@@ -236,11 +236,71 @@ try {
   assert.equal(sent.length, 2)
   checks.restartObservesTokenWithoutResending = true
 
+  // Review and dispute both ownership routes through the authenticated API.
+  const postDecision = (action, payload) => fetch(`${base}/api/dsh-deepcanary/decision/${action}`, {
+    method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(payload),
+  })
+  const review = await postDecision('review', { id: recorded.id })
+  assert.equal(review.status, 200)
+  assert.equal((await review.json()).item.decision.reviewState, 'reviewed')
+  checks.madeDecisionReviewed = true
+  const topDispute = await postDecision('dispute', { id: recorded.id, text: 'Reconsider the top-level decision.' })
+  assert.equal(topDispute.status, 200)
+  assert.equal((await topDispute.json()).item.decision.reviewState, 'disputed')
+  assert.equal(sent.length, 3)
+  assert.match(sent[2].content[0].text, /already applied.*disagrees/i)
+  assert.ok(sent[2].content[0].text.includes(recorded.id))
+  resumed.append('user/message', sent[2], { surfaceOp: 'append' })
+  assert.equal((await readInbox()).find(item => item.id === recorded.id).decision.deliveryState, 'delivered')
+  checks.topLevelDisputeDeliveredAndObserved = true
+  const childDispute = await postDecision('dispute', { id: subagent.id, text: 'Reconsider the subagent decision.' })
+  assert.equal(childDispute.status, 200)
+  assert.equal(sent.length, 4)
+  assert.ok(sent[3].content[0].text.includes(subagent.id) && sent[3].content[0].text.includes(child.id))
+  resumed.append('user/message', sent[3], { surfaceOp: 'append' })
+  assert.equal((await readInbox()).find(item => item.id === subagent.id).decision.deliveryState, 'delivered')
+  checks.subagentDisputeRoutedToParent = true
+
+  const offlineMade = await tool('deepcanary_record_decision').execute({ ...valid, sentence: 'An offline made decision.' }, { agent: { id: resumed.id } })
+  const offlineSeed = resumed.snapshotEvents()
+  detachers.pop()()
+  detachers.pop()()
+  const queuedDispute = await postDecision('dispute', { id: offlineMade.id, text: 'Reconsider while offline.' })
+  assert.equal(queuedDispute.status, 200)
+  assert.equal((await queuedDispute.json()).item.decision.deliveryState, 'queued')
+  assert.equal(sent.length, 4)
+  const resumedAgain = ctx.sessions.prepare(parent.id, { meta: { cwd: directory }, seed: offlineSeed })
+  detachers.push(ctx.sessions.enter(resumedAgain))
+  detachers.push(ctx.agents.enter({ id: resumedAgain.id, session: resumedAgain, ctx, inbox: { nextTurn: [] }, followup(message) { sent.push(message) } }))
+  ctx.sessions.announce(resumedAgain)
+  await service.adapter.reconcile()
+  await waitFor(() => sent.length === 5, 'queued disagreement did not reach the resumed session')
+  await service.adapter.reconcile()
+  await service.dispose()
+  assert.equal(sent.length, 5)
+  assert.ok(sent[4].content[0].text.includes(offlineMade.id))
+  resumedAgain.append('user/message', sent[4], { surfaceOp: 'append' })
+  fibers.splice(fibers.indexOf(routesFiber), 1)
+  await routesFiber.dispose()
+  service = new DeepCanaryService(ctx, { stateDir: directory })
+  await service.ready
+  bindTools()
+  service.start()
+  await service.adapter.start()
+  routesFiber = await ctx.plugin(pluginCtx => installWebRoutes(pluginCtx, service))
+  fibers.push(routesFiber)
+  await waitFor(() => service.decisionsFor(parent.id).find(item => item.id === offlineMade.id)?.decision?.deliveryState === 'delivered', 'restart did not observe disputed token')
+  assert.equal(sent.length, 5)
+  checks.offlineDisputeDeliveredOnce = true
+
   // This session is deliberately not materialized; after detachment the real
   // backend reports it absent, unlike the retained owner above.
   const missingSession = openSession('controlled-missing-session', { cwd: directory })
   const missing = await tool('deepcanary_request_decision').execute(
     { ...valid, sentence: 'A decision whose session is removed.', options: [] }, { agent: { id: missingSession.id } },
+  )
+  const missingMade = await tool('deepcanary_record_decision').execute(
+    { ...valid, sentence: 'A made decision whose session is removed.' }, { agent: { id: missingSession.id } },
   )
   detachers.pop()()
   assert.equal(await ctx.sessionPersistence.stat(missingSession.id), undefined)
@@ -251,6 +311,16 @@ try {
   assert.equal(unavailable?.decision?.sessionUnavailable, true)
   assert.equal(unavailable?.decision?.sentence, missing.decision.sentence)
   checks.deletedTargetRefusedAndRetained = true
+  const refusedDispute = await postDecision('dispute', { id: missingMade.id, text: 'Cannot deliver' })
+  assert.equal(refusedDispute.status, 400)
+  assert.match((await refusedDispute.json()).error, /unavailable/i)
+  const unavailableMade = (await readInbox()).find(item => item.id === missingMade.id)
+  assert.equal(unavailableMade?.decision?.sessionUnavailable, true)
+  assert.equal(unavailableMade?.decision?.sentence, missingMade.decision.sentence)
+  assert.equal(unavailableMade?.decision?.reviewState, 'unreviewed')
+  const deleteMade = await postDecision('delete', { id: missingMade.id })
+  assert.equal(deleteMade.status, 200)
+  checks.missingDisputeRefusedRetainedAndDeleted = true
   const deletion = await fetch(`${base}/api/dsh-deepcanary/decision/delete`, {
     method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ id: missing.id }),
   })

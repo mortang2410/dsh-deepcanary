@@ -57,6 +57,88 @@ describe('decisions', () => {
     expect(listed?.decision).toEqual({ kind: 'made', ...valid, delegationDepth: 0, workingDirectory: cwd, reviewState: 'unreviewed' })
   })
 
+  it('persists a made decision as reviewed without acknowledging it', async () => {
+    const headers = { top: { cwd } }
+    const { service, directory } = await open(headers)
+    const made = await service.recordMadeDecision('top', valid)
+    expect(made.decision?.reviewState).toBe('unreviewed')
+    const reviewed = await service.reviewDecision(made.id)
+    expect(reviewed.decision?.reviewState).toBe('reviewed')
+    expect(service.acknowledge(made.id)).toBe(false)
+    await service.dispose()
+    const restarted = await open(headers, directory)
+    expect(restarted.service.decisionsFor('top')[0]?.decision?.reviewState).toBe('reviewed')
+  })
+
+  it('routes a subagent disagreement to its parent and observes the delivery token', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-dispute-parent-'))
+    directories.push(directory)
+    const listeners = new Map<string, (...args: unknown[]) => void>()
+    const parent = { id: 'top', header: { cwd }, snapshotEvents: () => [] }
+    const child = { id: 'child', header: { cwd, parentSession: 'top', delegationDepth: 1 }, snapshotEvents: () => [] }
+    const sent: Array<{ role: string; source: { kind: string }; content: Array<{ text: string }> }> = []
+    const host = { logger: {}, on: (event: string, listener: (...args: unknown[]) => void) => { listeners.set(event, listener) },
+      sessions: { get: (id: string) => id === 'top' ? parent : id === 'child' ? child : undefined, list: () => [parent, child], flush: async () => true },
+      agents: { get: (id: string) => id === 'top' ? { session: parent, followup: (message: typeof sent[number]) => { sent.push(message) } } : undefined } }
+    const service = new DeepCanaryService(host as never, { stateDir: directory })
+    services.push(service)
+    await service.ready
+    service.start()
+    await service.adapter.start()
+    const made = await service.recordMadeDecision('child', valid)
+    const disputed = await service.disputeDecision(made.id, 'Please undo this.')
+    expect(disputed.decision).toMatchObject({ reviewState: 'disputed', disputeText: 'Please undo this.', deliveryState: 'queued' })
+    expect(service.snapshot().inbox.some(item => item.id === made.id)).toBe(true)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.content[0]!.text).toContain(made.id)
+    expect(sent[0]!.content[0]!.text).toContain('child')
+    expect(sent[0]!.content[0]!.text).toMatch(/already applied/i)
+    expect(sent[0]!.content[0]!.text).toMatch(/disagree/i)
+    listeners.get('session/event')?.(parent, { type: 'user/message', data: sent[0] })
+    expect(service.decisionsFor('child')[0]?.decision?.deliveryState).toBe('delivered')
+    expect(service.acknowledge(made.id)).toBe(false)
+  })
+
+  it('refuses overlong disagreements and queues a valid one for a retained offline target', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-dispute-offline-'))
+    directories.push(directory)
+    const session = { id: 'top', header: { cwd }, snapshotEvents: () => [] }
+    let live = true
+    const host = { logger: {}, sessions: { get: () => live ? session : undefined },
+      sessionPersistence: { stat: async () => ({ header: { id: 'top' } }) } }
+    const service = new DeepCanaryService(host as never, { stateDir: directory })
+    services.push(service)
+    await service.ready
+    const made = await service.recordMadeDecision('top', valid)
+    live = false
+    await expect(service.disputeDecision(made.id, 'x'.repeat(2001))).rejects.toThrow(/limit is 2000/)
+    expect(service.decisionsFor('top')[0]?.decision?.reviewState).toBe('unreviewed')
+    const disputed = await service.disputeDecision(made.id, 'x'.repeat(2000))
+    expect(disputed.decision).toMatchObject({ reviewState: 'disputed', deliveryState: 'queued', disputeText: 'x'.repeat(2000) })
+    await expect(service.disputeDecision(made.id, 'Again')).rejects.toThrow(/already been disputed/)
+    await service.dispose()
+    const restarted = new DeepCanaryService(host as never, { stateDir: directory })
+    services.push(restarted)
+    await restarted.ready
+    expect(restarted.decisionsFor('top')[0]?.decision).toMatchObject({ reviewState: 'disputed', deliveryState: 'queued', disputeText: 'x'.repeat(2000) })
+  })
+
+  it('refuses disagreement for an absent target and retains the marked decision until deletion', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-dispute-missing-'))
+    directories.push(directory)
+    const session = { id: 'top', header: { cwd } }
+    let live = true
+    const host = { logger: {}, sessions: { get: () => live ? session : undefined }, sessionPersistence: { stat: async () => undefined } }
+    const service = new DeepCanaryService(host as never, { stateDir: directory })
+    services.push(service)
+    await service.ready
+    const made = await service.recordMadeDecision('top', valid)
+    live = false
+    await expect(service.disputeDecision(made.id, 'Please reconsider')).rejects.toThrow(/unavailable/)
+    expect(service.decisionsFor('top')[0]?.decision).toMatchObject({ sentence: valid.sentence, reviewState: 'unreviewed', sessionUnavailable: true })
+    expect(await service.deleteUnavailableDecision(made.id)).toBe(true)
+  })
+
   it('stores the parent session and delegation depth of a subagent decision', async () => {
     const { service } = await open({ top: { cwd }, child: { cwd, parentSession: 'top', delegationDepth: 1 } })
     const item = await service.recordMadeDecision('child', valid)

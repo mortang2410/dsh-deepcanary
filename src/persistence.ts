@@ -405,6 +405,7 @@ function isDecisionRecord(value: unknown): value is DecisionRecord {
     && (record.options === undefined || isDecisionOptions(record.options))
     && (record.answer === undefined || (typeof record.answer === 'string' && [...record.answer].length <= DECISION_LIMITS.answer))
     && (record.answerAt === undefined || (typeof record.answerAt === 'string' && record.answerAt.length <= 64))
+    && (record.disputeText === undefined || (typeof record.disputeText === 'string' && [...record.disputeText].length <= DECISION_LIMITS.disputeText))
     && (record.deliveryToken === undefined || isSafeOpaqueId(record.deliveryToken))
     && (record.deliveryState === undefined || record.deliveryState === 'queued' || record.deliveryState === 'delivered')
     && (record.deliveryClaim === undefined || isSafeOpaqueId(record.deliveryClaim))

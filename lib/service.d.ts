@@ -102,6 +102,10 @@ export declare class DeepCanaryService {
         blastRadius: unknown;
         options: unknown;
     }): Promise<PublicInboxItem>;
+    /** Mark a made decision reviewed without closing or acknowledging the entry. */
+    reviewDecision(id: string): Promise<PublicInboxItem>;
+    /** Persist one disagreement before routing it through the ordinary delivery queue. */
+    disputeDecision(id: string, input: unknown): Promise<PublicInboxItem>;
     /** Commit one answer before attempting delivery to the owning session or its parent. */
     answerDecision(id: string, input: unknown): Promise<PublicInboxItem>;
     private requireDecisionTarget;

@@ -690,6 +690,63 @@ export class DeepCanaryService {
     return this.toPublic(item)
   }
 
+  /** Mark a made decision reviewed without closing or acknowledging the entry. */
+  async reviewDecision(id: string): Promise<PublicInboxItem> {
+    await this.ready
+    if (this.disposed) throw new Error('DeepCanary is shutting down; nothing was reviewed')
+    const item = this.find(id)
+    const decision = item?.decision
+    if (item === undefined || decision?.kind !== 'made') throw new Error('No made decision with that id')
+    if (decision.reviewState === 'disputed') throw new Error('A disputed decision cannot be marked reviewed')
+    if (decision.reviewState === 'reviewed') return this.toPublic(item)
+    const previous = decision.reviewState
+    decision.reviewState = 'reviewed'
+    this.bumpRevision()
+    if (!await this.queueSave()) {
+      if (previous === undefined) delete decision.reviewState
+      else decision.reviewState = previous
+      this.bumpRevision()
+      throw new Error('The review could not be saved')
+    }
+    return this.toPublic(item)
+  }
+
+  /** Persist one disagreement before routing it through the ordinary delivery queue. */
+  async disputeDecision(id: string, input: unknown): Promise<PublicInboxItem> {
+    await this.ready
+    if (this.disposed) throw new Error('DeepCanary is shutting down; nothing was disputed')
+    const item = this.find(id)
+    const decision = item?.decision
+    if (item === undefined || decision?.kind !== 'made') throw new Error('No made decision with that id')
+    if (decision.disputeText !== undefined) throw new Error('This decision has already been disputed')
+    const disputeText = boundedDecisionText('disputeText', input, true)
+    await this.requireDecisionTarget(item)
+    if (this.disposed) throw new Error('DeepCanary is shutting down; nothing was disputed')
+    if (this.find(id) !== item) throw new Error('No made decision with that id')
+    if (decision.disputeText !== undefined) throw new Error('This decision has already been disputed')
+    const previousReview = decision.reviewState
+    decision.reviewState = 'disputed'
+    decision.disputeText = disputeText
+    decision.deliveryToken = randomUUID()
+    decision.deliveryState = 'queued'
+    decision.deliveryAttempts = 0
+    decision.deliveryRecoveries = 0
+    this.bumpRevision()
+    if (!await this.queueSave()) {
+      if (previousReview === undefined) delete decision.reviewState
+      else decision.reviewState = previousReview
+      delete decision.disputeText
+      delete decision.deliveryToken
+      delete decision.deliveryState
+      delete decision.deliveryAttempts
+      delete decision.deliveryRecoveries
+      this.bumpRevision()
+      throw new Error('The disagreement could not be saved; nothing was delivered')
+    }
+    await this.flushPendingDelivery(item)
+    return this.toPublic(item)
+  }
+
   /** Commit one answer before attempting delivery to the owning session or its parent. */
   async answerDecision(id: string, input: unknown): Promise<PublicInboxItem> {
     await this.ready
@@ -804,7 +861,8 @@ export class DeepCanaryService {
   private async performDecisionDelivery(item: InboxItem): Promise<void> {
     const decision = item.decision
     const target = decision?.parentSessionId ?? item.sessionId
-    if (decision?.answer === undefined || decision.deliveryToken === undefined || decision.deliveryState !== 'queued'
+    if (decision === undefined || (decision.answer === undefined && decision.disputeText === undefined)
+      || decision.deliveryToken === undefined || decision.deliveryState !== 'queued'
       || target === undefined || this.decisionDeliveries.has(item.id) || !this.adapter.hasLiveAgent(target)) return
     this.decisionDeliveries.add(item.id)
     try {
@@ -846,7 +904,9 @@ export class DeepCanaryService {
       }
       this.restoredDecisionDeliveries.delete(item.id)
       try {
-        const text = `The user answered a decision.\nDecision id: ${item.id}\nQuestion: ${decision.sentence}\nAnswer: ${decision.answer}\nDelivery token: ${decision.deliveryToken}\nTreat the decision id as an idempotency key.`
+        const text = decision.disputeText === undefined
+          ? `The user answered a decision.\nDecision id: ${item.id}\nQuestion: ${decision.sentence}\nAnswer: ${decision.answer}\nDelivery token: ${decision.deliveryToken}\nTreat the decision id as an idempotency key.`
+          : `The decision was already applied and the user disagrees.\nDecision id: ${item.id}\n${decision.parentSessionId === undefined ? '' : `Subagent session: ${item.sessionId}\n`}Decision: ${decision.sentence}\nDisagreement: ${decision.disputeText}\nDelivery token: ${decision.deliveryToken}\nTreat the decision id as an idempotency key.`
         if (!await this.adapter.deliverDecision(target, text)) throw new Error('The target agent is not live')
         if (recovering && decision.deliveryClaim === claim) {
           decision.deliveryRecoveries = 1
@@ -884,7 +944,8 @@ export class DeepCanaryService {
   private observeDecisionDelivery(sessionId: string, value: unknown): void {
     for (const item of this.items) {
       const decision = item.decision
-      if (decision?.answer === undefined || decision.deliveryState !== 'queued' || decision.deliveryToken === undefined
+      if (decision === undefined || (decision.answer === undefined && decision.disputeText === undefined)
+        || decision.deliveryState !== 'queued' || decision.deliveryToken === undefined
         || (decision.parentSessionId ?? item.sessionId) !== sessionId || !this.deliveryMessageHasToken(value, decision.deliveryToken)) continue
       this.markDecisionDelivered(decision)
       this.restoredDecisionDeliveries.delete(item.id)
@@ -1572,7 +1633,8 @@ export class DeepCanaryService {
       this.items.splice(0, this.items.length, ...retainInboxItems(restored.items, this.config.maxInboxItems))
       for (const item of this.items) {
         this.restoredAttention.add(item.id)
-        if (item.decision?.answer !== undefined && item.decision.deliveryState === 'queued'
+        if (item.decision !== undefined && (item.decision.answer !== undefined || item.decision.disputeText !== undefined)
+          && item.decision.deliveryState === 'queued'
           && (item.decision.deliveryClaim !== undefined || item.decision.deliveryAttempts === undefined)) {
           this.restoredDecisionDeliveries.add(item.id)
         }

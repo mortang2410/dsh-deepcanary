@@ -154,6 +154,8 @@ export interface DecisionRecord {
   /** Answer delivery remains queued until its token appears in the target session. */
   answer?: string
   answerAt?: string
+  /** The user's disagreement with an already-applied decision, at most 2000 characters. */
+  disputeText?: string
   deliveryToken?: string
   deliveryState?: 'queued' | 'delivered'
   /** Persisted in-flight generation; the delivery token changes when a generation is resent. */
