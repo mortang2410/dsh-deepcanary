@@ -8,7 +8,8 @@ export interface ClientCapabilities {
 export const rendererCapabilities: ClientCapabilities = {
   request: (path, init) => {
     const endpoint = path.split('?')[0]
-    if (!['state', 'settings', 'health', 'action', 'explain', 'dry-run', 'outcomes', 'outcome', 'supervisor']
+    if (!['state', 'settings', 'health', 'action', 'explain', 'dry-run', 'outcomes', 'outcome', 'supervisor',
+      'decision/answer', 'decision/review', 'decision/dispute', 'decision/delete', 'outcomes/delete']
       .some(name => endpoint === '/api/dsh-deepcanary/' + name)) return Promise.reject(new Error('Invalid plugin endpoint'))
     return fetch(path, { cache: 'no-store', ...init })
   },
