@@ -1,20 +1,31 @@
-import { readFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
-import { rendererCapabilities } from '../src/client/capabilities.js'
+import { API_BASE_PATH, installWebRoutes } from '../src/web.js'
+import { PLUGIN_ENDPOINT_SUFFIXES, rendererCapabilities } from '../src/client/capabilities.js'
 
-const webSource = readFileSync(new URL('../src/web.ts', import.meta.url), 'utf8')
-const registeredRoutes = [...webSource.matchAll(/register\('([a-z/-]+)'/g)].map(match => match[1])
+function registeredPaths(): string[] {
+  const paths: string[] = []
+  const ctx = {
+    inject: (_services: string[], callback: (context: unknown) => void) => callback({
+      connection: { fetch: { register: (route: { path: string }) => { paths.push(route.path) } } },
+    }),
+  }
+  installWebRoutes(ctx, {} as never)
+  return paths.sort()
+}
 
 describe('renderer endpoint boundary', () => {
-  it('accepts every route the host registers so panel writes cannot be rejected locally', async () => {
+  it('admits exactly the routes the host registers', async () => {
     const fetchMock = vi.fn(async () => new Response('{}'))
     vi.stubGlobal('fetch', fetchMock)
     try {
-      expect(registeredRoutes).toContain('decision/answer')
-      for (const route of registeredRoutes) {
-        await expect(rendererCapabilities.request(`/api/dsh-deepcanary/${route}`, { method: 'POST' })).resolves.toBeInstanceOf(Response)
+      const paths = registeredPaths()
+      expect(paths).toEqual(PLUGIN_ENDPOINT_SUFFIXES.map(suffix => `${API_BASE_PATH}/${suffix}`).sort())
+      for (const path of paths) {
+        await expect(rendererCapabilities.request(path, { method: 'POST' })).resolves.toBeInstanceOf(Response)
       }
-      expect(fetchMock).toHaveBeenCalledTimes(registeredRoutes.length)
+      expect(fetchMock).toHaveBeenCalledTimes(paths.length)
+      await expect(rendererCapabilities.request(`${API_BASE_PATH}/decision/unknown`)).rejects.toThrow('Invalid plugin endpoint')
+      expect(fetchMock).toHaveBeenCalledTimes(paths.length)
     } finally { vi.unstubAllGlobals() }
   })
 

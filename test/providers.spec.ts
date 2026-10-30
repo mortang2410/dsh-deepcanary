@@ -96,9 +96,17 @@ describe('runtime providers', () => {
   })
 
   it('leaves context lifecycle events to the rollover plugin and keeps recovery unbundled', () => {
-    const event = { type: 'context/compaction', time: 4_000, data: { kind: 'compaction' } }
-    expect(signalsFromSessionEvent(session, event, { ...facts, contextCompactions: 1 })).toEqual([])
-    expect(signalsFromSessionEvent(session, event, { ...facts, contextCompactions: 2 })).toEqual([])
+    const lifecycleEvents = [
+      { type: 'context/compaction', data: { kind: 'compaction' } },
+      { type: 'context/pressure', data: { kind: 'pressure' } },
+      { type: 'context/overflow', data: { kind: 'overflow' } },
+      { type: 'session/token-limit', data: {} },
+      { type: 'context/compaction', data: { kind: 'token-limit' } },
+    ]
+    for (const event of lifecycleEvents) {
+      expect(signalsFromSessionEvent(session, { time: 4_000, ...event }, { ...facts, contextCompactions: 1 })).toEqual([])
+      expect(signalsFromSessionEvent(session, { time: 4_000, ...event }, { ...facts, contextCompactions: 2 })).toEqual([])
+    }
     expect(signalFromStallRecovery(session).bundleKey).toBe('session-1:stall')
   })
 
