@@ -2188,7 +2188,7 @@ export function itemCard(item: ClientItem, context: InboxRenderContext): ReactNo
   }, ...children)
 }
 
-function decisionSessionGroup(
+export function decisionSessionGroup(
   group: DecisionSessionGroup<ClientItem>,
   rootSessionId: string,
   parentDepth: number,

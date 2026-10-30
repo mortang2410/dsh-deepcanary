@@ -174,7 +174,6 @@ describe('DeepCanary DSH client surface', () => {
     expect(source).toContain('useSyncExternalStore')
     expect(source).toContain('subscribeSessionList')
     expect(source).toContain('data-decision-filter')
-    expect(source).toContain('dsc-session-group')
     expect(source).toContain('handleNotificationClick')
     expect(source).toContain('notificationTitle')
     expect(source).toContain('claimNotificationBatch')
@@ -250,6 +249,65 @@ describe('decision card rendering', () => {
     }
   }
 
+  /** An item for one pending decision, with the fields a card reads. */
+  const pendingItem = (id: string, sentence: string): Record<string, unknown> => ({
+    id,
+    level: 'C2',
+    status: 'open',
+    occurredAt: '2026-01-01T00:00:00.000Z',
+    evidence: [],
+    targetAvailable: true,
+    bundleCount: 1,
+    decision: { kind: 'pending', sentence, explanation: 'Context for the decision.' },
+  })
+
+  type RenderedElement = { type: unknown; props: Record<string, unknown> }
+
+  /** Every element of a rendered tree, the root first, in document order. */
+  function elementsOf(node: unknown, out: RenderedElement[] = []): RenderedElement[] {
+    if (Array.isArray(node)) {
+      for (const child of node) elementsOf(child, out)
+      return out
+    }
+    if (node !== null && typeof node === 'object' && 'props' in node) {
+      const element = node as RenderedElement
+      out.push(element)
+      elementsOf(element.props.children, out)
+    }
+    return out
+  }
+
+  /** The section a session renders as, found anywhere in a rendered group tree. */
+  function sessionSection(tree: unknown, sessionId: string): RenderedElement {
+    const section = elementsOf(tree).find(element => element.props['data-session-group'] === sessionId)
+    if (section === undefined) throw new Error(`no section rendered for session ${sessionId}`)
+    return section
+  }
+
+  async function renderGroup(group: Record<string, unknown>, rootSessionId: string): Promise<unknown> {
+    const { decisionSessionGroup } = await import('../src/client/index.js')
+    const previous = Reflect.get(globalThis, 'document')
+    Reflect.set(globalThis, 'document', { documentElement: { lang: 'en' } })
+    try {
+      const context = {
+        state: { pending: new Set<string>() },
+        t: translate,
+        controller: { hasHistoricalSession: () => false },
+        sessionListSnapshot: undefined,
+        selectedId: undefined,
+      }
+      return decisionSessionGroup(
+        group as unknown as Parameters<typeof decisionSessionGroup>[0],
+        rootSessionId,
+        0,
+        context as unknown as Parameters<typeof decisionSessionGroup>[3],
+      )
+    } finally {
+      if (previous === undefined) Reflect.deleteProperty(globalThis, 'document')
+      else Reflect.set(globalThis, 'document', previous)
+    }
+  }
+
   it('shows the stored answer on a pending decision and hides the answer form', async () => {
     const text = await render({
       id: 'decision-1',
@@ -274,5 +332,100 @@ describe('decision card rendering', () => {
 
     expect(text).toContain('T:item.decisionSubmit')
     expect(text).not.toContain('T:item.decisionAnswerGiven')
+  })
+
+  it('shows the options of a pending decision on its card', async () => {
+    const text = await render({
+      id: 'decision-3',
+      level: 'C2',
+      status: 'open',
+      occurredAt: '2026-01-01T00:00:00.000Z',
+      decision: { kind: 'pending', sentence: 'Which store?', explanation: 'Two stores compete.', options: ['Keep the store', 'Move it'] },
+    })
+
+    expect(text).toContain('T:item.decisionOptions Keep the store · Move it')
+  })
+
+  it('shows no options line for a pending decision without options', async () => {
+    const text = await render({
+      id: 'decision-4',
+      level: 'C2',
+      status: 'open',
+      occurredAt: '2026-01-01T00:00:00.000Z',
+      decision: { kind: 'pending', sentence: 'Which store?', explanation: 'Two stores compete.' },
+    })
+
+    expect(text).not.toContain('T:item.decisionOptions')
+  })
+
+  it('nests child session groups inside their parent with their own depth, indent, title, and items', async () => {
+    const tree = await renderGroup({
+      sessionId: 'root',
+      depth: 0,
+      title: 'Root session',
+      workingDirectory: '/work/root',
+      items: [pendingItem('root-decision', 'Root question?')],
+      children: [{
+        sessionId: 'child',
+        depth: 1,
+        title: 'Child session',
+        items: [pendingItem('child-decision', 'Child question?')],
+        children: [],
+      }, {
+        sessionId: 'sibling',
+        depth: 1,
+        title: 'Sibling session',
+        items: [pendingItem('sibling-decision', 'Sibling question?')],
+        children: [],
+      }],
+    }, 'root')
+
+    const root = sessionSection(tree, 'root')
+    const child = sessionSection(tree, 'child')
+    const sibling = sessionSection(tree, 'sibling')
+    expect(root.props).toMatchObject({
+      className: 'dsc-session-group',
+      'data-session-group': 'root',
+      'data-root-session': 'root',
+      'data-depth': 0,
+      style: { marginInlineStart: '0px' },
+    })
+    for (const section of [child, sibling]) {
+      expect(section.props).toMatchObject({
+        className: 'dsc-session-group',
+        'data-session-group': section.props['data-session-group'],
+        'data-root-session': 'root',
+        'data-depth': 1,
+        style: { marginInlineStart: '16px' },
+      })
+      expect(elementsOf(root)).toContain(section)
+    }
+
+    const cardFor = (section: RenderedElement, id: string): RenderedElement | undefined =>
+      elementsOf(section).find(element => element.props['data-deepcanary-item'] === id)
+    /** The cards this section renders itself, excluding the nested sections below it. */
+    const ownCardIds = (section: RenderedElement): string[] => {
+      const children = section.props.children
+      const nodes = (Array.isArray(children) ? children : [children]) as unknown[]
+      return nodes
+        .filter((node): node is RenderedElement => typeof node === 'object' && node !== null && 'props' in node)
+        .map(node => node.props['data-deepcanary-item'])
+        .filter((id): id is string => typeof id === 'string')
+    }
+    expect(cardText(root)).toContain('Root session')
+    expect(cardText(child)).toContain('Child session')
+    expect(cardText(sibling)).toContain('Sibling session')
+    expect(cardText(root)).toContain('T:panel.sessionDirectory /work/root')
+    expect(cardText(child).join('\n')).not.toContain('T:panel.sessionDirectory')
+    expect(cardText(sibling).join('\n')).not.toContain('T:panel.sessionDirectory')
+
+    expect(ownCardIds(root)).toEqual(['root-decision'])
+    expect(ownCardIds(child)).toEqual(['child-decision'])
+    expect(ownCardIds(sibling)).toEqual(['sibling-decision'])
+    expect(cardText(cardFor(root, 'root-decision')).join('\n')).toContain('Root question?')
+    expect(cardText(cardFor(child, 'child-decision')).join('\n')).toContain('Child question?')
+    expect(cardText(cardFor(sibling, 'sibling-decision')).join('\n')).toContain('Sibling question?')
+    expect(cardFor(child, 'sibling-decision')).toBeUndefined()
+    expect(cardFor(sibling, 'child-decision')).toBeUndefined()
   })
 })
