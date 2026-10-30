@@ -245,13 +245,6 @@ export function signalsFromSessionEvent(session: SessionLike, event: SessionEven
     result.push(signal('tool', 'TOOL_FAILURE_LOOP', session, event, facts, evidence('tool-history', 'derived', ref, 'The same tool has produced repeated structured failures.'), { ...visibilityData, failureCount, toolName: facts.lastFailedToolName ?? facts.lastToolName ?? toolName }, 2, `${session.id}:tool-failure-loop`))
   }
 
-  const contextMarker = `${eventType} ${typeof data.kind === 'string' ? data.kind : ''}`
-  if (/compaction|context[-_/]?(pressure|overflow)|token[-_/]?limit/i.test(contextMarker)) {
-    const pressure = /pressure|overflow|token[-_/]?limit/i.test(contextMarker)
-      || ((facts.contextCompactions ?? 0) >= 2 && /compaction/i.test(contextMarker))
-    result.push(signal('session', pressure ? 'CONTEXT_PRESSURE' : 'COMPACTION_OCCURRED', session, event, facts, evidence('session-event', 'runtime', ref, 'DSH reported a context lifecycle event.'), visibilityData, pressure ? 2 : 1, `${session.id}:context`))
-  }
-
   if (data.healthy !== true && (data.progress === false || data.meaningfulProgress === false || /no[-_/]?progress|stuck|idle/i.test(eventType))) {
     result.push(signal('session', 'NO_MEANINGFUL_PROGRESS', session, event, facts, evidence('runtime-probe', 'derived', ref, 'The session reported no meaningful progress during an active run.'), visibilityData, 2, `${session.id}:progress`))
   }
