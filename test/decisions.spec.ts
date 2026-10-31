@@ -807,7 +807,7 @@ describe('decisions', () => {
       expect(service.snapshot().scheduled?.[0]).toMatchObject({ id: requested.id, status: 'snoozed', reminderPending: true })
     })
 
-    it('filters and groups scheduled decisions while retaining scheduled attention in All and Pending', async () => {
+    it('filters and groups scheduled decisions while keeping attention out of the panel', async () => {
       const { service } = await open({ top: { cwd } })
       const pending = await service.requestDecision('top', { ...valid, options })
       const made = await service.recordMadeDecision('top', { ...valid, sentence: 'A made decision.' })
@@ -830,15 +830,38 @@ describe('decisions', () => {
       const pendingView = filterDecisionLists([], scheduled, 'pending')
       const madeView = filterDecisionLists([], scheduled, 'made')
       expect(all.hasDecisions).toBe(true)
-      expect(all.scheduled.map(item => item.id)).toEqual(expect.arrayContaining([pending.id, made.id, attention!.id]))
-      expect(pendingView.scheduled.map(item => item.id)).toEqual(expect.arrayContaining([pending.id, attention!.id]))
+      expect(all.scheduled.map(item => item.id)).toEqual(expect.arrayContaining([pending.id, made.id]))
+      expect(all.scheduled.map(item => item.id)).not.toContain(attention!.id)
+      expect(pendingView.scheduled.map(item => item.id)).toEqual([pending.id])
       expect(pendingView.scheduled.map(item => item.id)).not.toContain(made.id)
       expect(madeView.scheduled.map(item => item.id)).toEqual([made.id])
       expect(groupDecisionItems(madeView.scheduled).map(group => group.items.map(item => item.id))).toEqual([[made.id]])
       expect(filterDecisionLists([], [pending], 'made', pending.id).activeFilter).toBe('all')
-      expect(filterDecisionLists([], [attention!], 'made', attention!.id).activeFilter).toBe('all')
       expect(filterDecisionLists([], [made], 'made', made.id).activeFilter).toBe('made')
       expect(filterDecisionLists([], [], 'made').activeFilter).toBe('all')
+    })
+
+    it('keeps automatic session signals out of the decision inbox', async () => {
+      const { service } = await open({ top: { cwd } })
+      const signal = (kind: 'TASK_COMPLETED' | 'TASK_FAILED', severityHint?: number) => ({
+        schemaVersion: 1 as const,
+        id: `panel-${kind}`,
+        occurredAt: new Date().toISOString(),
+        source: 'session' as const,
+        kind,
+        sessionId: 'top',
+        ...(severityHint === undefined ? {} : { severityHint }),
+        evidence: [{ type: 'session-event' as const, authority: 'runtime' as const, ref: 'turn/end', summary: 'DSH reported a terminal turn.' }],
+        dedupeKey: `panel-${kind}`,
+        data: {},
+      })
+      await service.ingest(signal('TASK_COMPLETED'))
+      await service.ingest(signal('TASK_FAILED', 2))
+      expect(service.snapshot().inbox).toEqual([])
+      expect(service.snapshot().status.openInbox).toBe(0)
+      const requested = await service.requestDecision('top', { ...valid, options })
+      expect(service.snapshot().inbox.map(item => item.id)).toEqual([requested.id])
+      expect(service.snapshot().status.openInbox).toBe(1)
     })
 
     it('brings a snoozed pending decision back to the pending view at its reminder time', async () => {

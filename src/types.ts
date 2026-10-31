@@ -19,6 +19,11 @@ export type ReasonCode =
   | 'DECISION_PENDING'
   | 'DECISION_MADE'
 
+/** Entries a model explicitly raised through the decision tools. The Inbox shows only these. */
+export function isModelInvokedDecision(reason: ReasonCode): boolean {
+  return reason === 'DECISION_PENDING' || reason === 'DECISION_MADE'
+}
+
 /** Low-risk event classes that a user may silence persistently from the Inbox. */
 export type SuppressibleReasonCode = 'TASK_COMPLETED' | 'COMPACTION_OCCURRED' | 'SUBAGENT_PRESSURE'
 

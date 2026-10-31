@@ -49,7 +49,7 @@ describe('DeepCanaryService', () => {
     } finally { await service.dispose(); await rm(directory, { recursive: true, force: true }) }
   })
 
-  it('keeps urgent pending work ahead of more than one page of routine completions', async () => {
+  it('keeps routine completions and human waits out of the decision panel', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-priority-'))
     const service = new DeepCanaryService({ logger: {} } as never, { stateDir: directory, maxInboxItems: 100 })
     services.push(service)
@@ -58,10 +58,11 @@ describe('DeepCanaryService', () => {
       const human = await service.ingest({ ...testSignal(), id: 'urgent-question', kind: 'HUMAN_QUESTION_PENDING', severityHint: 3 })
       for (let index = 0; index < 60; index += 1) await service.ingest({ ...testSignal(), id: `routine-${index}`, kind: 'TASK_COMPLETED',
         occurredAt: new Date(Date.now() + index + 1).toISOString(), dedupeKey: `routine-${index}` })
-      expect(service.snapshot().inbox).toHaveLength(61)
-      expect(service.snapshot().inbox[0]?.id).toBe(human?.id)
+      expect(service.inbox(100)).toHaveLength(61)
+      expect(service.snapshot().inbox).toEqual([])
+      expect(service.snapshot().status.openInbox).toBe(0)
       service.snooze(human!.id, 10)
-      expect(service.snapshot().inbox.some(item => item.id === human?.id)).toBe(false)
+      expect(service.snapshot().inbox).toEqual([])
     } finally { await service.dispose(); await rm(directory, { recursive: true, force: true }) }
   })
 
@@ -73,10 +74,9 @@ describe('DeepCanaryService', () => {
       await service.ready
       const first = await service.ingest({ ...testSignal(), id: 'question-first', kind: 'HUMAN_QUESTION_PENDING', severityHint: 3 })
       expect(service.feedback(first!.id, false, undefined, 'already-resolved')).toBe(true)
-      expect(service.snapshot().inbox).toEqual([])
       expect(service.explain(first!.id)).toMatchObject({ status: 'acknowledged', taskState: 'waiting-human' })
       const next = await service.ingest({ ...testSignal(), id: 'question-next', kind: 'HUMAN_QUESTION_PENDING', severityHint: 3, dedupeKey: 'question-next' })
-      expect(service.snapshot().inbox[0]).toMatchObject({ id: next?.id, level: 'C3' })
+      expect(service.explain(next!.id)).toMatchObject({ id: next?.id, level: 'C3' })
     } finally { await service.dispose(); await rm(directory, { recursive: true, force: true }) }
   })
 
@@ -459,7 +459,7 @@ describe('DeepCanaryService', () => {
     const muted = await service.performAction('mute-visible-request', feedbackItem?.id ?? '', 'mute')
     expect(muted.body).toMatchObject({ updated: true, item: { id: 'feedback-visible', status: 'open' } })
     expect((muted.body.item as { mutedUntil?: string }).mutedUntil).toEqual(expect.any(String))
-    expect(service.snapshot().inbox.some(item => item.id === 'feedback-visible')).toBe(true)
+    expect(service.inbox(20).some(item => item.id === 'feedback-visible')).toBe(true)
     const unmuted = await service.performAction('unmute-visible-request', feedbackItem?.id ?? '', 'unmute')
     expect(unmuted.body).toMatchObject({ updated: true, result: { kind: 'unmute-complete' }, item: { id: 'feedback-visible' } })
     expect((unmuted.body.item as { mutedUntil?: string }).mutedUntil).toBeUndefined()
@@ -1126,8 +1126,9 @@ describe('DeepCanaryService', () => {
     }))
     const results = await Promise.all(jobs)
     expect(results.filter(Boolean)).toHaveLength(250)
-    expect(service.snapshot().inbox).toHaveLength(50)
-    expect(service.snapshot().status.openInbox).toBe(50)
+    expect(service.inbox(100)).toHaveLength(50)
+    expect(service.snapshot().inbox).toHaveLength(0)
+    expect(service.snapshot().status.openInbox).toBe(0)
     await service.dispose()
     await rm(directory, { recursive: true, force: true })
   })

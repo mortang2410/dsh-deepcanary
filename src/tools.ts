@@ -1,4 +1,5 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { isModelInvokedDecision } from './types.js'
 import type { DeepCanaryService } from './service.js'
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
@@ -57,12 +58,12 @@ export function registerTools(ctx: unknown, service: DeepCanaryService): string[
 
   register(defineTool({
     name: 'deepcanary_inbox',
-    description: 'Read recent DeepCanary attention items with their severity, reason, evidence summary, and current status.',
+    description: 'Read recent DeepCanary decision entries with their severity, reason, evidence summary, and current status.',
     parameters: {
       limit: { type: 'integer', description: 'Maximum number of items to return; defaults to 20.' },
     },
     output: jsonOutput(),
-    execute: async args => asJson(service.inbox(args.limit ?? 20)),
+    execute: async args => asJson(service.inbox(args.limit ?? 20).filter(item => isModelInvokedDecision(item.reasonCode))),
   }))
 
   register(defineTool({

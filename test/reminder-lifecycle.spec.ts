@@ -34,7 +34,7 @@ describe('scheduled reminder lifecycle', () => {
       const escalated = await service.ingest({ ...signal(Date.now(), 'HOST_UNREACHABLE'), id: 'authoritative-outage',
         severityHint: 3, bundleKey: 'owned-outage', dedupeKey: 'confirmed-outage' })
       expect(escalated?.id).toBe(first.id)
-      expect(service.snapshot().inbox[0]).toMatchObject({ level: 'C3', notificationGeneration: 1, notificationEligible: true })
+      expect(service.explain(first.id)).toMatchObject({ level: 'C3', notificationGeneration: 1, notificationEligible: true })
       expect((await service.performAction('new-escalation', first.id, 'notification-claim', claim(Date.now(), 1))).body.result).toMatchObject({ outcome: 'granted' })
     } finally { await service.dispose(); await rm(directory, { recursive: true, force: true }) }
   })
@@ -49,11 +49,11 @@ describe('scheduled reminder lifecycle', () => {
       await service.performAction('claim-first', item.id, 'notification-claim', claim(now))
       await service.performAction('delivered-first', item.id, 'notification-delivery', delivered(item.id, now))
       service.snooze(item.id, 1)
-      expect(service.snapshot().scheduled?.[0]).toMatchObject({ id: item.id, notificationGeneration: 1 })
+      expect(service.explain(item.id)).toMatchObject({ status: 'snoozed', notificationGeneration: 1 })
       expect((await service.performAction('stale-during-snooze', item.id, 'notification-claim', claim(now))).body.result).toMatchObject({ outcome: 'unavailable' })
       expect((await service.performAction('current-during-snooze', item.id, 'notification-claim', claim(now, 1))).body.result).toMatchObject({ outcome: 'unavailable' })
       now += 60_001
-      expect(service.snapshot().inbox[0]).toMatchObject({ id: item.id, notificationGeneration: 1, notificationEligible: true })
+      expect(service.explain(item.id)).toMatchObject({ id: item.id, notificationGeneration: 1, notificationEligible: true })
       expect((await service.performAction('stale-after-snooze', item.id, 'notification-claim', claim(now))).body.result).toMatchObject({ outcome: 'unavailable' })
       expect((await service.performAction('new-generation', item.id, 'notification-claim', claim(now, 1))).body.result).toMatchObject({ outcome: 'granted' })
       expect((await service.performAction('competing-tab', item.id, 'notification-claim', claim(now, 1, 'tab-b'))).body.result).toMatchObject({ outcome: 'already-claimed' })
@@ -72,11 +72,13 @@ describe('scheduled reminder lifecycle', () => {
       service.snooze(item.id, 1)
       service.config.quietHours = { enabled: true, start: '00:00', end: '00:00' }
       now += 60_001
-      expect(service.snapshot().inbox[0]).toMatchObject({ action: 'DIGEST', reminderPending: true, notificationEligible: false })
+      service.inbox()
+      expect(service.explain(item.id)).toMatchObject({ action: 'DIGEST', reminderPending: true, notificationEligible: false })
       expect(service.status().delivery.interruptBudget.used).toBe(1)
       service.config.quietHours.enabled = false
-      expect(service.snapshot().inbox[0]).toMatchObject({ action: 'INTERRUPT', notificationEligible: true })
-      service.snapshot()
+      service.inbox()
+      expect(service.explain(item.id)).toMatchObject({ action: 'INTERRUPT', notificationEligible: true })
+      service.inbox()
       expect(service.status().delivery.interruptBudget.used).toBe(2)
     } finally { await service.dispose(); clock.mockRestore(); await rm(directory, { recursive: true, force: true }) }
   })
@@ -110,17 +112,16 @@ describe('scheduled reminder lifecycle', () => {
       const item = (await service.ingest(signal(Date.now(), 'TASK_COMPLETED')))!
       service.snooze(item.id, 30)
       service.seen(item.id)
-      expect(service.snapshot().scheduled?.[0]).toMatchObject({ id: item.id, status: 'snoozed', level: 'C1' })
+      expect(service.explain(item.id)).toMatchObject({ id: item.id, status: 'snoozed', level: 'C1' })
       service.snooze(item.id, 15)
-      expect(service.snapshot().scheduled?.[0]?.notificationGeneration).toBe(2)
+      expect(service.explain(item.id)?.notificationGeneration).toBe(2)
       const resumed = await service.performAction('resume', item.id, 'unsnooze')
       expect(resumed.body.updated).toBe(true)
-      expect(service.snapshot().scheduled).toEqual([])
-      expect(service.snapshot().inbox[0]).toMatchObject({ id: item.id, level: 'C1', action: 'INBOX', notificationEligible: false })
+      expect(service.explain(item.id)?.status).not.toBe('snoozed')
+      expect(service.explain(item.id)).toMatchObject({ id: item.id, level: 'C1', action: 'INBOX', notificationEligible: false })
       service.snooze(item.id, 1)
       service.acknowledge(item.id)
-      expect(service.snapshot().scheduled).toEqual([])
-      expect(service.snapshot().inbox).toEqual([])
+      expect(service.explain(item.id)?.status).toBe('acknowledged')
     } finally { await service.dispose(); await rm(directory, { recursive: true, force: true }) }
   })
 
@@ -134,9 +135,11 @@ describe('scheduled reminder lifecycle', () => {
       const item = (await service.ingest(signal(now, 'TASK_FAILED')))!
       service.snooze(item.id, 1)
       now += 60_001
-      expect(service.snapshot().inbox[0]).toMatchObject({ action: 'DIGEST', reminderPending: true })
+      service.inbox()
+      expect(service.explain(item.id)).toMatchObject({ action: 'DIGEST', reminderPending: true })
       now += 60 * 60_000
-      expect(service.snapshot().inbox[0]).toMatchObject({ action: 'INTERRUPT', notificationEligible: true })
+      service.inbox()
+      expect(service.explain(item.id)).toMatchObject({ action: 'INTERRUPT', notificationEligible: true })
       expect(service.status().delivery.interruptBudget.used).toBe(1)
       service.acknowledge(item.id)
       expect((await service.performAction('acknowledged', item.id, 'notification-claim', claim(now, 1))).body.result).toMatchObject({ outcome: 'unavailable' })
@@ -172,7 +175,7 @@ describe('scheduled reminder lifecycle', () => {
       now += 60_001
       service = new DeepCanaryService({ logger: {} } as never, { stateDir: directory })
       await service.ready
-      expect(service.snapshot().inbox[0]).toMatchObject({ level: 'C3', reminderPending: true, notificationEligible: false })
+      expect(service.explain(item.id)).toMatchObject({ level: 'C3', reminderPending: true, notificationEligible: false })
       expect((await service.performAction('unverified', item.id, 'notification-claim', claim(now, 1))).body.result).toMatchObject({ outcome: 'unavailable' })
     } finally { await service.dispose(); clock.mockRestore(); await rm(directory, { recursive: true, force: true }) }
   })
@@ -200,8 +203,8 @@ describe('scheduled reminder lifecycle', () => {
       service.snooze(later.id, 60)
       for (let index = 0; index < 80; index++) await service.ingest({ ...signal(now + index + 1, 'TASK_COMPLETED'),
         id: `routine-${index}`, dedupeKey: `routine-${index}` })
-      expect(service.snapshot().inbox[0]?.id).toBe(critical.id)
-      expect(service.snapshot().scheduled?.[0]?.id).toBe(later.id)
+      expect(service.inbox(100).some(item => item.id === critical.id)).toBe(true)
+      expect(service.explain(later.id)).toMatchObject({ status: 'snoozed' })
       expect(service.inbox(100)).toHaveLength(50)
     } finally { await service.dispose(); await rm(directory, { recursive: true, force: true }) }
   })

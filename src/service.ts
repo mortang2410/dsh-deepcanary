@@ -66,7 +66,7 @@ import type {
   SuppressibleReasonCode,
   TaskState,
 } from './types.js'
-import { ATTENTION_POLICY_VERSION, ATTENTION_PROTOCOL_VERSION as PROTOCOL_VERSION, SUPPRESSIBLE_REASON_CODES } from './types.js'
+import { ATTENTION_POLICY_VERSION, ATTENTION_PROTOCOL_VERSION as PROTOCOL_VERSION, isModelInvokedDecision, SUPPRESSIBLE_REASON_CODES } from './types.js'
 
 const PLUGIN_NAME = 'dsh-deepcanary'
 const PLUGIN_VERSION = '0.1.6-rc.4'
@@ -521,10 +521,10 @@ export class DeepCanaryService {
       status,
       settings: this.publicSettings(),
       inbox: this.items
-        .filter(item => this.isPending(item, now))
+        .filter(item => isModelInvokedDecision(item.reasonCode) && this.isPending(item, now))
         .sort(compareInboxPriority)
         .map(item => this.toPublic(item)),
-      scheduled: this.items.filter(item => item.status === 'snoozed' && item.snoozedUntil !== undefined && Date.parse(item.snoozedUntil) > now)
+      scheduled: this.items.filter(item => isModelInvokedDecision(item.reasonCode) && item.status === 'snoozed' && item.snoozedUntil !== undefined && Date.parse(item.snoozedUntil) > now)
         .sort((left, right) => Date.parse(left.snoozedUntil!) - Date.parse(right.snoozedUntil!))
         .map(item => this.toPublic(item)),
     }
@@ -533,7 +533,7 @@ export class DeepCanaryService {
   status(): RuntimeStatus {
     const now = Date.now()
     this.normalizeLifecycle(now)
-    const open = this.items.filter(item => this.isPending(item, now) && this.decisionNeedsUser(item)).map(item => item.level)
+    const open = this.items.filter(item => isModelInvokedDecision(item.reasonCode) && this.isPending(item, now) && this.decisionNeedsUser(item)).map(item => item.level)
     const highest = open.reduce<AttentionLevel>((current, level) => levelValue[level] > levelValue[current] ? level : current, 'C0')
     return {
       plugin: { name: PLUGIN_NAME, version: PLUGIN_VERSION, state: this.hydrated ? 'ready' : 'loading' },

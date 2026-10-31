@@ -1,6 +1,8 @@
 import type { PersistentSupervisorStatus } from './supervisor.js';
 /** Stable reason codes emitted by DeepCanary providers. */
 export type ReasonCode = 'HUMAN_APPROVAL_REQUIRED' | 'HUMAN_QUESTION_PENDING' | 'HOST_UNREACHABLE' | 'HOST_SUSPECTED_STALL' | 'TOOL_FAILURE_LOOP' | 'NO_MEANINGFUL_PROGRESS' | 'SUBAGENT_PRESSURE' | 'CONTEXT_PRESSURE' | 'COMPACTION_OCCURRED' | 'TASK_COMPLETED' | 'TASK_FAILED' | 'TASK_ABORTED' | 'COMPLETION_SUSPICIOUS' | 'HOST_STALL_RECOVERED' | 'DECISION_PENDING' | 'DECISION_MADE';
+/** Entries a model explicitly raised through the decision tools. The Inbox shows only these. */
+export declare function isModelInvokedDecision(reason: ReasonCode): boolean;
 /** Low-risk event classes that a user may silence persistently from the Inbox. */
 export type SuppressibleReasonCode = 'TASK_COMPLETED' | 'COMPACTION_OCCURRED' | 'SUBAGENT_PRESSURE';
 export declare const SUPPRESSIBLE_REASON_CODES: readonly SuppressibleReasonCode[];
