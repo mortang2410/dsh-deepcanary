@@ -12,7 +12,7 @@ DeepCanary adds a local decision inbox to [DeepSeek Harness](https://github.com/
 
 **Release candidate: 0.1.6-rc.4.** The supported Host baseline is released DSH **0.2.1-rc.2** for WebUI and official Windows Desktop. Get the package from [npm](https://www.npmjs.com/package/dsh-deepcanary) or [GitHub Releases](https://github.com/Oscar-Williams/dsh-deepcanary/releases/tag/v0.1.6-rc.4). Both `latest` and `next` select this RC.
 
-Background jobs remain visible through completion and plugin reload. Healthy activity stays quiet, and a failed background task still returns you to its owning session.
+Background jobs appear in the activity status while they run. Plugin reload restores the tracking, and a job the Host cannot confirm keeps an unknown status.
 
 Choose a delay, review the reminder in **Scheduled**, adjust its time or restore it to pending. Each arrangement is tracked independently across tabs and reloads. Due reminders use current notification preferences, and scheduled decisions stay visible in Inbox.
 

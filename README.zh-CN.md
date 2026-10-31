@@ -8,7 +8,7 @@ DeepCanary 为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harnes
 
 **当前发布候选为 0.1.6-rc.4。** 宿主基线为已发布的 DSH **0.2.1-rc.2**，覆盖 WebUI 与官方 Windows Desktop。安装包见 [npm](https://www.npmjs.com/package/dsh-deepcanary) 和 [GitHub Releases](https://github.com/Oscar-Williams/dsh-deepcanary/releases/tag/v0.1.6-rc.4)，`latest` 与 `next` 均指向此 RC。
 
-本版加入后台任务持续跟踪和重载补收。后台失败仍可定位到所属会话，健康任务保持安静。
+本版加入后台任务持续跟踪和重载补收。健康任务保持安静，宿主无法确认的任务保留待确认状态。
 
 选择稍后提醒的时间后，可在收件箱查看安排、改期或恢复待办。各次安排分别跟踪，到期后遵循当前通知策略；已安排的决定仍保留在收件箱中。
 
