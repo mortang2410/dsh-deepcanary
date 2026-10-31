@@ -76,6 +76,8 @@ export declare class DeepCanaryService {
     settings(): PublicSettings;
     updateSettings(input: Record<string, unknown>): Promise<PublicSettings>;
     inbox(limit?: number): PublicInboxItem[];
+    /** Decision entries the panel can surface, newest first; the limit applies after filtering. */
+    decisionInbox(limit?: number): PublicInboxItem[];
     /**
      * Record a decision the owning session already took. It enters the inbox as a
      * made decision at C1, so it never notifies, and it bypasses the attention

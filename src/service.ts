@@ -595,6 +595,13 @@ export class DeepCanaryService {
     return this.items.slice(0, safeLimit).map(item => this.toPublic(item))
   }
 
+  /** Decision entries the panel can surface, newest first; the limit applies after filtering. */
+  decisionInbox(limit = 20): PublicInboxItem[] {
+    this.normalizeLifecycle(Date.now())
+    const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(100, Math.trunc(limit))) : 20
+    return this.items.filter(item => isModelInvokedDecision(item.reasonCode)).slice(0, safeLimit).map(item => this.toPublic(item))
+  }
+
   /**
    * Record a decision the owning session already took. It enters the inbox as a
    * made decision at C1, so it never notifies, and it bypasses the attention
@@ -2121,6 +2128,12 @@ export class DeepCanaryService {
 
   /** Apply delivery policy and reserve one C2 budget unit only for a new interrupt. */
   private applyPolicy(verdict: AttentionVerdict, now: number, budgetConsumed = false): AttentionVerdict {
+    // The budget throttles user-visible notifications. An entry the inbox cannot
+    // surface must not reserve it, or a burst of hidden failures would silence a
+    // model-invoked decision.
+    if (!isModelInvokedDecision(verdict.reasonCode)) {
+      return applyDeliveryPolicy(verdict, this.config, now, { budgetAvailable: true })
+    }
     const first = applyDeliveryPolicy(verdict, this.config, now, {
       budgetAvailable: budgetConsumed || this.budget.canInterrupt(now),
       ...(budgetConsumed ? { budgetConsumed: true } : {}),

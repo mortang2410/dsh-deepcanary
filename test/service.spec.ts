@@ -8,6 +8,15 @@ import type { CanarySignal } from '../src/types.js'
 
 const services: DeepCanaryService[] = []
 
+const decisionInput = {
+  sentence: 'Keep the existing store.',
+  explanation: 'The store already persists items.',
+  alternatives: 'A second store was rejected.',
+  blastRadius: 'Only the inbox store.',
+  options: ['Keep', 'Replace'],
+}
+const sessionHost = () => ({ logger: {}, sessions: { get: () => ({ header: { cwd: '/work' } }) } })
+
 function testSignal(): CanarySignal {
   return {
     schemaVersion: 1,
@@ -348,22 +357,22 @@ describe('DeepCanaryService', () => {
     await rm(directory, { recursive: true, force: true })
   })
 
-  it('downgrades the fourth C2 notification to a digest', async () => {
+  it('downgrades the fourth pending decision to a digest', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-budget-'))
-    const service = new DeepCanaryService({ logger: {} } as never, { stateDir: directory, maxInterruptsPerHour: 3, maxInboxItems: 50 })
+    const service = new DeepCanaryService(sessionHost() as never, { stateDir: directory, maxInterruptsPerHour: 3, maxInboxItems: 50 })
     services.push(service)
     await service.ready
     const actions: string[] = []
     for (let index = 0; index < 4; index += 1) {
-      const item = await service.ingest({ ...testSignal(), id: `approval-${index}`, dedupeKey: `approval:${index}`, occurredAt: new Date(index + 1_000).toISOString() })
-      if (item) actions.push(item.action)
+      const item = await service.requestDecision('budget-session', { ...decisionInput, sentence: `Decision ${index}.` })
+      actions.push(item.action)
     }
     expect(actions).toEqual(['INTERRUPT', 'INTERRUPT', 'INTERRUPT', 'DIGEST'])
     await service.dispose()
     await rm(directory, { recursive: true, force: true })
   })
 
-  it('charges one interrupt when a C1 bundle later escalates, and keeps policy caps budget-free', async () => {
+  it('keeps hidden bundle escalations out of the decision notification budget', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-bundle-budget-'))
     const service = new DeepCanaryService({ logger: {} } as never, { stateDir: directory, maxInterruptsPerHour: 1, maxInboxItems: 50 })
     services.push(service)
@@ -389,7 +398,7 @@ describe('DeepCanaryService', () => {
       occurredAt: new Date(now + 1).toISOString(),
     })
     expect(escalated).toMatchObject({ level: 'C2', action: 'INTERRUPT', bundleCount: 2 })
-    expect(service.status().delivery.interruptBudget).toMatchObject({ used: 1, remaining: 0 })
+    expect(service.status().delivery.interruptBudget).toMatchObject({ used: 0, remaining: 1 })
     const repeated = await service.ingest({
       ...testSignal(),
       id: 'bundle-repeat',
@@ -399,7 +408,7 @@ describe('DeepCanaryService', () => {
       occurredAt: new Date(now + 2).toISOString(),
     })
     expect(repeated).toMatchObject({ level: 'C2', action: 'INTERRUPT', bundleCount: 3 })
-    expect(service.status().delivery.interruptBudget).toMatchObject({ used: 1, remaining: 0 })
+    expect(service.status().delivery.interruptBudget).toMatchObject({ used: 0, remaining: 1 })
 
     const quietDirectory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-bundle-quiet-'))
     const quiet = new DeepCanaryService({ logger: {} } as never, {
@@ -454,7 +463,7 @@ describe('DeepCanaryService', () => {
       result: { kind: 'feedback-recorded', useful: true, value: 'useful' },
       item: { id: 'feedback-visible', feedback: { useful: true, value: 'useful' } },
     })
-    expect(service.status().delivery.interruptBudget).toMatchObject({ limit: 3, used: 1, remaining: 2 })
+    expect(service.status().delivery.interruptBudget).toMatchObject({ limit: 3, used: 0, remaining: 3 })
 
     const muted = await service.performAction('mute-visible-request', feedbackItem?.id ?? '', 'mute')
     expect(muted.body).toMatchObject({ updated: true, item: { id: 'feedback-visible', status: 'open' } })
@@ -920,10 +929,10 @@ describe('DeepCanaryService', () => {
     }
   })
 
-  it('restores dedupe and interrupt budget across an experimental Supervisor restart', async () => {
+  it('restores dedupe and the decision interrupt budget across an experimental Supervisor restart', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-supervisor-policy-restart-'))
     try {
-      const first = new DeepCanaryService({ logger: {} } as never, {
+      const first = new DeepCanaryService(sessionHost() as never, {
         stateDir: directory,
         maxInboxItems: 50,
         maxInterruptsPerHour: 1,
@@ -934,11 +943,13 @@ describe('DeepCanaryService', () => {
       await first.ready
       first.start()
       await (first as unknown as { supervisorStart: Promise<void> }).supervisorStart
-      const accepted = await first.ingest({ ...testSignal(), id: 'policy-restart-accepted', dedupeKey: 'policy-restart:accepted' })
-      expect(accepted?.action).toBe('INTERRUPT')
+      const seeded = await first.ingest({ ...testSignal(), id: 'policy-restart-accepted', dedupeKey: 'policy-restart:accepted' })
+      expect(seeded?.action).toBe('INTERRUPT')
+      const accepted = await first.requestDecision('policy-session', decisionInput)
+      expect(accepted.action).toBe('INTERRUPT')
       await first.dispose()
 
-      const second = new DeepCanaryService({ logger: {} } as never, {
+      const second = new DeepCanaryService(sessionHost() as never, {
         stateDir: directory,
         maxInboxItems: 50,
         maxInterruptsPerHour: 1,
@@ -952,8 +963,8 @@ describe('DeepCanaryService', () => {
 
       const deduped = await second.ingest({ ...testSignal(), id: 'policy-restart-duplicate', dedupeKey: 'policy-restart:accepted' })
       expect(deduped).toBeUndefined()
-      const budgeted = await second.ingest({ ...testSignal(), id: 'policy-restart-budgeted', dedupeKey: 'policy-restart:second' })
-      expect(budgeted?.action).toBe('DIGEST')
+      const budgeted = await second.requestDecision('policy-session', { ...decisionInput, sentence: 'Second decision.' })
+      expect(budgeted.action).toBe('DIGEST')
       expect(second.status().delivery.interruptBudget.used).toBe(1)
     } finally {
       for (const service of services.splice(0)) await service.dispose()
@@ -961,11 +972,11 @@ describe('DeepCanaryService', () => {
     }
   })
 
-  it('keeps one final interrupt across three normal experimental Supervisor restarts', async () => {
+  it('keeps one final decision interrupt across three normal experimental Supervisor restarts', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-supervisor-three-restarts-'))
     try {
       for (let restart = 0; restart < 4; restart += 1) {
-        const service = new DeepCanaryService({ logger: {} } as never, {
+        const service = new DeepCanaryService(sessionHost() as never, {
           stateDir: directory,
           maxInboxItems: 50,
           maxInterruptsPerHour: 1,
@@ -976,13 +987,8 @@ describe('DeepCanaryService', () => {
         await service.ready
         service.start()
         await (service as unknown as { supervisorStart: Promise<void> }).supervisorStart
-        if (restart === 0) {
-          const accepted = await service.ingest({ ...testSignal(), id: 'three-restart-accepted', dedupeKey: 'three-restart:accepted' })
-          expect(accepted?.action).toBe('INTERRUPT')
-        } else {
-          const duplicate = await service.ingest({ ...testSignal(), id: `three-restart-duplicate-${restart}`, dedupeKey: 'three-restart:accepted' })
-          expect(duplicate).toBeUndefined()
-        }
+        const decision = await service.requestDecision('policy-session', { ...decisionInput, sentence: `Restart decision ${restart}.` })
+        expect(decision.action).toBe(restart === 0 ? 'INTERRUPT' : 'DIGEST')
         expect(service.status().delivery.interruptBudget.used).toBe(1)
         await service.dispose()
       }

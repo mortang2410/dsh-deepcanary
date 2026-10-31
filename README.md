@@ -8,13 +8,13 @@
 
 English · [简体中文](README.zh-CN.md) · [Documentation](docs/README.md) · [Changelog](CHANGELOG.md)
 
-DeepCanary adds a local task inbox to [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness). It brings questions, approvals, failures and completion summaries together, applies quiet notification policies, and returns you to the relevant session.
+DeepCanary adds a local decision inbox to [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness). It records the decisions an agent takes and the non-blocking decisions it needs from you, keeps them in one central Inbox, applies quiet notification policies, and returns you to the relevant session.
 
 **Release candidate: 0.1.6-rc.4.** The supported Host baseline is released DSH **0.2.1-rc.2** for WebUI and official Windows Desktop. Get the package from [npm](https://www.npmjs.com/package/dsh-deepcanary) or [GitHub Releases](https://github.com/Oscar-Williams/dsh-deepcanary/releases/tag/v0.1.6-rc.4). Both `latest` and `next` select this RC.
 
-Background jobs remain visible through completion and plugin reload. Inbox places urgent work first, and choosing **Already resolved** marks the selected reminder handled. Background failures return you to their owning session. Healthy background activity stays quiet.
+Background jobs remain visible through completion and plugin reload. Healthy activity stays quiet, and a failed background task still returns you to its owning session.
 
-Choose a delay, review the reminder in **Scheduled**, adjust its time or restore it to pending. Each arrangement is tracked independently across tabs and reloads. Due reminders use current notification preferences, and Inbox preserves human waits and scheduled work when routine updates arrive in large numbers.
+Choose a delay, review the reminder in **Scheduled**, adjust its time or restore it to pending. Each arrangement is tracked independently across tabs and reloads. Due reminders use current notification preferences, and scheduled decisions stay visible in Inbox.
 
 ![DeepCanary Inbox](assets/deepcanary-panel-en.png)
 
@@ -69,21 +69,23 @@ DSH profiles own their sessions and configuration. Save active work before chang
 
 | Level | Meaning | Behavior |
 | --- | --- | --- |
-| C1 | Suggested check | Routine outcomes and completion summaries remain in Inbox. |
-| C2 | Needs attention | Failures and possible stalls follow your notification policy. |
-| C3 | Immediate human attention | Requires authoritative evidence of an active question, approval or blocking condition. |
+| C1 | Decision recorded | A made decision waits in Inbox for review without interrupting. |
+| C2 | Decision needed | A pending decision follows the notification level, quiet hours and rolling budget. |
+| C3 | Immediate attention | The highest notification level, reserved for authoritative blocking conditions. |
 
-Related events are grouped and deduplicated. Tools stay quiet while progress is being observed within the configured grace period. Timed questions remain answerable after timeout, and accepted replies close their reminder. Completion summaries survive recovery and reload. Stopped tasks retain their stopped state; fork history stays quiet.
+The Inbox carries decisions only. Automatic task signals never appear in Inbox, the sidebar badge or notifications, even when they reach C2 or C3.
 
-Background jobs appear in the activity status while they run. Progress closes a previous stall reminder when activity returns. During live observation, an uncollected result enters Inbox at C1 on completion or C2 on failure. Results already received by a waiting task and intentional cancellation stay quiet. A reply that finishes while background work continues says so explicitly. Reload restores tracking and collects missed observations once. Recovered messages identify their context and preserve uncertainty about earlier result collection. Tasks the Host cannot confirm retain unknown status.
+Decisions are not deduplicated or bundled: each carries its own id, so a repeated delivery cannot double-apply an answer. A decision survives recovery and reload, and its entry stays visible when the owning session has ended.
 
-Inbox orders pending items by urgency, with questions and approvals ahead of routine updates. Further pages remain accessible through **Show more updates**. Choosing **Already resolved** records your feedback and marks that reminder handled; new questions retain their own reminder lifecycle.
+Background jobs appear in the activity status while they run. Results are collected through completion and plugin reload; a task the Host cannot confirm keeps an unknown status.
 
-An agent can put a decision to you without stopping its turn. It calls `deepcanary_request_decision` with the decision in one sentence, an explanation, the alternatives considered, the blast radius and up to five options of at most 120 characters each, then keeps working. The card is labeled Pending decision and shows its options and the session it belongs to. It has no Acknowledge action and never expires. It leaves the Pending filter when answered or withdrawn with `deepcanary_cancel_decision`; an answered entry remains in All. Snooze and reminders work as they do for other items.
+Inbox lists pending decisions before made decisions. Further decisions remain accessible through **Show more updates**. A pending decision keeps its own reminder lifecycle; feedback and reminders are tracked per entry.
 
-Made and pending decisions appear in the same Inbox, grouped under their root session with subagent sessions nested by delegation depth. Each group shows the session title and working directory; until a title arrives, the directory basename is a placeholder. Entries are chronological within each session. All is the complete default view. Pending, Made, Reviewed and Disputed filter decisions; Made selects unreviewed made decisions. The same filters and grouping apply to scheduled decisions. Attention items remain visible in All and Pending, including scheduled attention, in their existing priority order with decision groups.
+An agent can put a decision to you without stopping its turn. It calls `deepcanary_request_decision` with the decision in one sentence, an explanation, the alternatives considered, the blast radius and up to five options of at most 120 characters each, then keeps working. The card is labeled Pending decision and shows its options and the session it belongs to. It has no Acknowledge action and never expires. It leaves the Pending filter when answered or withdrawn with `deepcanary_cancel_decision`; an answered entry remains in All. Snooze and reminders work for pending decisions.
 
-**Remind later** offers 5, 15, 30 and 60 minutes. Scheduled cards show their return time and remain available for review. At the deadline, C1 returns to Inbox and C2 follows quiet hours and the rolling budget. C3 requires current authoritative evidence. A resolved or acknowledged item stays closed. Local profile state preserves deduplication, budget and notification status through plugin replacement. Actual OS delivery depends on the device and application lifecycle.
+Made and pending decisions appear in the same Inbox, grouped under their root session with subagent sessions nested by delegation depth. Each group shows the session title and working directory; until a title arrives, the directory basename is a placeholder. Entries are chronological within each session. All is the complete default view. Pending, Made, Reviewed and Disputed filter decisions; Made selects unreviewed made decisions. The same filters and grouping apply to scheduled decisions. Automatic task signals never enter Inbox; only decisions and their scheduled entries are listed.
+
+**Remind later** offers 5, 15, 30 and 60 minutes. Scheduled decisions show their return time and remain available for review. At the deadline the entry returns to Inbox; a pending decision follows quiet hours and the rolling budget. An answered or cancelled pending decision leaves Pending, and a reviewed or disputed made decision leaves Made. Local profile state preserves the decision history, budget and notification status through plugin replacement. Actual OS delivery depends on the device and application lifecycle.
 
 The resizable Inbox has opaque light/dark surfaces, keyboard controls and expandable evidence. Navigation verifies the target in DSH's public session catalog. An unavailable target keeps its summary and explains its availability.
 

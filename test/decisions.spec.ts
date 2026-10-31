@@ -864,6 +864,53 @@ describe('decisions', () => {
       expect(service.snapshot().status.openInbox).toBe(1)
     })
 
+    it('returns an older decision from deepcanary_inbox behind newer automatic records', async () => {
+      const { service } = await open({ top: { cwd } })
+      const made = await service.recordMadeDecision('top', { ...valid, sentence: 'Older decision.' })
+      for (let index = 0; index < 20; index += 1) {
+        await service.ingest({
+          schemaVersion: 1 as const,
+          id: `newer-${index}`,
+          occurredAt: new Date(Date.now() + index).toISOString(),
+          source: 'session' as const,
+          kind: 'TASK_COMPLETED',
+          sessionId: 'top',
+          evidence: [{ type: 'session-event' as const, authority: 'runtime' as const, ref: 'turn/end', summary: 'Normal completion.' }],
+          dedupeKey: `newer-${index}`,
+          data: {},
+        })
+      }
+      expect(service.inbox(20).map(item => item.id)).not.toContain(made.id)
+      const definitions = new Map<string, { execute: (args: unknown, exec: unknown) => Promise<unknown> }>()
+      registerTools({ tools: { register: (definition: { name: string }) => definitions.set(definition.name, definition as never) } }, service)
+      const result = await definitions.get('deepcanary_inbox')!.execute({ limit: 20 }, {}) as Array<{ id: string }>
+      expect(result.map(item => item.id)).toContain(made.id)
+    })
+
+    it('keeps hidden automatic signals from spending the decision notification budget', async () => {
+      const { service } = await open({ top: { cwd } })
+      const kinds = ['TOOL_FAILURE_LOOP', 'TASK_ABORTED', 'TASK_FAILED'] as const
+      for (const [index, kind] of kinds.entries()) {
+        await service.ingest({
+          schemaVersion: 1 as const,
+          id: `hidden-${index}`,
+          occurredAt: new Date(Date.now() + index).toISOString(),
+          source: 'session' as const,
+          kind,
+          sessionId: 'top',
+          severityHint: 2,
+          evidence: [{ type: 'session-event' as const, authority: 'runtime' as const, ref: `event-${index}`, summary: 'Automatic attention signal.' }],
+          dedupeKey: `hidden-${index}`,
+          data: {},
+        })
+      }
+      expect(service.snapshot().status.openInbox).toBe(0)
+      expect(service.status().delivery.interruptBudget.used).toBe(0)
+      const requested = await service.requestDecision('top', { ...valid, options })
+      expect(requested).toMatchObject({ action: 'INTERRUPT', notificationEligible: true })
+      expect(service.status().delivery.interruptBudget.used).toBe(1)
+    })
+
     it('brings a snoozed pending decision back to the pending view at its reminder time', async () => {
       const { service } = await open({ top: { cwd } })
       let now = Date.parse('2026-10-29T08:00:00.000Z')

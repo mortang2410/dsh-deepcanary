@@ -6,6 +6,14 @@ import { DeepCanaryService } from '../src/service.js'
 import { hashMetadata } from '../src/persistence.js'
 import type { CanarySignal } from '../src/types.js'
 
+const decision = {
+  sentence: 'Keep the existing store.',
+  explanation: 'The store already persists items.',
+  alternatives: 'A second store was rejected.',
+  blastRadius: 'Only the inbox store.',
+  options: ['Keep', 'Replace'],
+}
+const hostWith = () => ({ logger: {}, sessions: { get: () => ({ header: { cwd: '/work' } }) } })
 const signal = (now: number, kind: CanarySignal['kind'] = 'HUMAN_QUESTION_PENDING'): CanarySignal => ({
   schemaVersion: 1, id: `reminder-${kind}`, occurredAt: new Date(now).toISOString(), source: 'session', kind,
   ...(kind === 'HUMAN_QUESTION_PENDING' ? { severityHint: 3 } : {}),
@@ -61,14 +69,14 @@ describe('scheduled reminder lifecycle', () => {
     } finally { await service.dispose(); clock.mockRestore(); await rm(directory, { recursive: true, force: true }) }
   })
 
-  it('retains due C2 work through quiet hours and consumes its new budget once', async () => {
+  it('retains a pending decision through quiet hours and consumes its new budget once', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-reminder-policy-'))
     let now = Date.now()
     const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
-    const service = new DeepCanaryService({ logger: {} } as never, { stateDir: directory, maxInterruptsPerHour: 2 })
+    const service = new DeepCanaryService(hostWith() as never, { stateDir: directory, maxInterruptsPerHour: 2 })
     try {
       await service.ready
-      const item = (await service.ingest(signal(now, 'TASK_FAILED')))!
+      const item = await service.requestDecision('top', decision)
       service.snooze(item.id, 1)
       service.config.quietHours = { enabled: true, start: '00:00', end: '00:00' }
       now += 60_001
@@ -125,14 +133,14 @@ describe('scheduled reminder lifecycle', () => {
     } finally { await service.dispose(); await rm(directory, { recursive: true, force: true }) }
   })
 
-  it('keeps an explicit reminder waiting until the rolling budget becomes available', async () => {
+  it('keeps an explicit decision reminder waiting until the rolling budget becomes available', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-reminder-budget-'))
     let now = Date.now()
     const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
-    const service = new DeepCanaryService({ logger: {} } as never, { stateDir: directory, maxInterruptsPerHour: 1 })
+    const service = new DeepCanaryService(hostWith() as never, { stateDir: directory, maxInterruptsPerHour: 1 })
     try {
       await service.ready
-      const item = (await service.ingest(signal(now, 'TASK_FAILED')))!
+      const item = await service.requestDecision('top', decision)
       service.snooze(item.id, 1)
       now += 60_001
       service.inbox()
@@ -141,24 +149,29 @@ describe('scheduled reminder lifecycle', () => {
       service.inbox()
       expect(service.explain(item.id)).toMatchObject({ action: 'INTERRUPT', notificationEligible: true })
       expect(service.status().delivery.interruptBudget.used).toBe(1)
-      service.acknowledge(item.id)
-      expect((await service.performAction('acknowledged', item.id, 'notification-claim', claim(now, 1))).body.result).toMatchObject({ outcome: 'unavailable' })
+      service.cancelDecision('top', item.id)
+      expect((await service.performAction('cancelled', item.id, 'notification-claim', claim(now, 1))).body.result).toMatchObject({ outcome: 'unavailable' })
     } finally { await service.dispose(); clock.mockRestore(); await rm(directory, { recursive: true, force: true }) }
   })
 
-  it('preserves budget and dedupe across ordinary default-mode restarts', async () => {
+  it('preserves dedupe and the decision interrupt budget across ordinary default-mode restarts', async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), 'deepcanary-default-policy-'))
-    let service = new DeepCanaryService({ logger: {} } as never, { stateDir: directory, maxInterruptsPerHour: 1 })
+    const ctx = hostWith()
+    let service = new DeepCanaryService(ctx as never, { stateDir: directory, maxInterruptsPerHour: 1 })
     try {
       await service.ready
       const event = signal(Date.now(), 'TASK_FAILED')
       expect((await service.ingest({ ...event, dedupeKey: 'first-failure' }))?.action).toBe('INTERRUPT')
+      expect(service.status().delivery.interruptBudget.used).toBe(0)
+      await service.requestDecision('top', decision)
+      expect(service.status().delivery.interruptBudget.used).toBe(1)
       await service.dispose()
-      service = new DeepCanaryService({ logger: {} } as never, { stateDir: directory, maxInterruptsPerHour: 1 })
+      service = new DeepCanaryService(ctx as never, { stateDir: directory, maxInterruptsPerHour: 1 })
       await service.ready
       expect(await service.ingest({ ...event, id: 'same-failure', dedupeKey: 'first-failure' })).toBeUndefined()
-      expect((await service.ingest({ ...event, id: 'another-failure', dedupeKey: 'another-failure' }))?.action).toBe('DIGEST')
       expect(service.status().delivery.interruptBudget.used).toBe(1)
+      const second = await service.requestDecision('top', { ...decision, sentence: 'Another decision.' })
+      expect(second.action).toBe('DIGEST')
     } finally { await service.dispose(); await rm(directory, { recursive: true, force: true }) }
   })
 
