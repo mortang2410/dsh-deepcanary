@@ -180,6 +180,8 @@ describe('DeepCanary DSH client surface', () => {
     expect(source).toContain('ctx.sessions')
     expect(source).toContain('sessions.list?.subscribe')
     expect(source).toContain('scheduleFromSessionRevision')
+    // Pins the floor that keeps an unrelated host revision bump from refetching the 236 KB state document more than once per MIN_REVISION_REFRESH_MS.
+    expect(source).toContain('MIN_REVISION_REFRESH_MS - since')
     expect(source).toContain('item.moreActions')
     expect(source).toContain('item.suppressType')
     expect(source).toContain('item.feedbackMenu')

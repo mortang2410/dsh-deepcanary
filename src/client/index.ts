@@ -863,6 +863,12 @@ function createController(ctx: ClientContext): Controller {
   let visibilityHandler: (() => void) | undefined
   let resizeHandler: (() => void) | undefined
   let noticeTimer: number | undefined
+  // The session list is a host-owned revision feed that bumps on unrelated
+  // host activity, so a revision-triggered refresh needs its own floor. The
+  // state document is 236 KB, and without the floor an idle tab refetched it
+  // every three to four seconds just because something else on the host wrote.
+  const MIN_REVISION_REFRESH_MS = 10_000
+  let lastStateRequestAt = 0
 
   const publish = (patch: Partial<ControllerState>): void => {
     state = { ...state, ...patch }
@@ -908,8 +914,12 @@ function createController(ctx: ClientContext): Controller {
     // The DSH session list is a host-owned revision feed. Coalesce bursts so
     // a token/event stream cannot turn the fallback state route into a second
     // high-frequency heartbeat; periodic polling still covers reconnects and
-    // runtimes without this optional feed.
-    schedule(document.visibilityState === 'hidden' ? 1_000 : 250)
+    // runtimes without this optional feed. The feed also bumps for reasons the
+    // inbox does not care about, so it may only pull the document forward to
+    // MIN_REVISION_REFRESH_MS, never re-request it on every bump.
+    const since = Date.now() - lastStateRequestAt
+    const wait = since >= MIN_REVISION_REFRESH_MS ? 250 : MIN_REVISION_REFRESH_MS - since
+    schedule(document.visibilityState === 'hidden' ? Math.max(wait, 1_000) : wait)
   }
 
   const decisionAction = async (id: string, action: 'review' | 'dispute', text?: string): Promise<void> => {
@@ -986,6 +996,7 @@ function createController(ctx: ClientContext): Controller {
     refresh: async () => {
       if (disposed || inFlight) return
       inFlight = true
+      lastStateRequestAt = Date.now()
       abort?.abort()
       abort = new AbortController()
       let requestTimeout: number | undefined
