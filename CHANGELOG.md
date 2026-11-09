@@ -2,7 +2,7 @@
 
 ## Unreleased: pending decisions
 
-- Poll the state document at most once per ten seconds when a host session revision pulls it forward. The revision feed bumps for host activity the inbox does not care about, and each bump used to refetch the whole 236 KB document: an idle tab made about eighteen fetches a minute of it. The floor brings that to six, and the fifteen-second base poll is unchanged.
+- Poll the state document at most once per ten seconds when a host session revision pulls it forward. The revision feed bumps for host activity the inbox does not care about, and each bump used to refetch the whole 236 KB document: an idle tab made about eighteen fetches a minute of it. The floor brings that to six, and the fifteen-second base poll is unchanged. A failed request also spends the window, so a burst of bumps cannot hammer an endpoint that is already failing; the base poll and its backoff own recovery.
 
 - Add `deepcanary_request_decision`. An agent uses it to put a decision to you and gets its id back at once, so its turn continues. The decision shows one sentence, its explanation, the alternatives, the blast radius, its options and the session it belongs to. It accepts up to five options of at most 120 characters each, and refuses a sixth option or a longer label rather than cutting it.
 - Add `deepcanary_cancel_decision`. The asking session can withdraw a pending decision. Answered and cancelled decisions leave Pending; answered entries remain in All.
