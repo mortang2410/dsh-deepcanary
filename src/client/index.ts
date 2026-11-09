@@ -916,7 +916,9 @@ function createController(ctx: ClientContext): Controller {
     // high-frequency heartbeat; periodic polling still covers reconnects and
     // runtimes without this optional feed. The feed also bumps for reasons the
     // inbox does not care about, so it may only pull the document forward to
-    // MIN_REVISION_REFRESH_MS, never re-request it on every bump.
+    // MIN_REVISION_REFRESH_MS, never re-request it on every bump. The stamp is
+    // taken before the request goes out, so a failed attempt also spends the
+    // window and the periodic poll, with its backoff, owns recovery.
     const since = Date.now() - lastStateRequestAt
     const wait = since >= MIN_REVISION_REFRESH_MS ? 250 : MIN_REVISION_REFRESH_MS - since
     schedule(document.visibilityState === 'hidden' ? Math.max(wait, 1_000) : wait)
